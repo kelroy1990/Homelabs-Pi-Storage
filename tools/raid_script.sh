@@ -1,0 +1,4231 @@
+#!/bin/bash
+
+# Script para configurar sistemas RAID en Raspberry Pi
+# Soporta BTRFS y ZFS
+
+set -e
+
+# Colores para output
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
+NC='\033[0m' # No Color
+
+# Función para mostrar mensajes
+show_message() {
+    echo -e "${GREEN}[INFO]${NC} $1"
+}
+
+show_warning() {
+    echo -e "${YELLOW}[WARNING]${NC} $1"
+}
+
+show_error() {
+    echo -e "${RED}[ERROR]${NC} $1"
+}
+
+show_title() {
+    echo -e "${BLUE}=== $1 ===${NC}"
+}
+
+# Función para obtener confirmación del usuario
+confirm() {
+    while true; do
+        read -p "$1 (y/n): " yn
+        case $yn in
+            [Yy]* ) return 0;;
+            [Nn]* ) return 1;;
+            * ) echo "Por favor responde y o n.";;
+        esac
+    done
+}
+
+# Función para verificar e instalar requisitos del sistema
+check_and_install_requirements() {
+    show_title "Verificando Requisitos del Sistema"
+    
+    # Actualizar lista de paquetes
+    show_message "Actualizando lista de paquetes..."
+    sudo apt update > /dev/null 2>&1
+    
+    local packages_to_install=()
+    local missing_packages=""
+    
+    # Verificar herramientas básicas
+    if ! command -v lsblk &> /dev/null; then
+        packages_to_install+=("util-linux")
+        missing_packages="$missing_packages util-linux"
+    fi
+    
+    if ! command -v parted &> /dev/null; then
+        packages_to_install+=("parted")
+        missing_packages="$missing_packages parted"
+    fi
+    
+    if ! command -v wipefs &> /dev/null; then
+        packages_to_install+=("util-linux")
+        missing_packages="$missing_packages util-linux"
+    fi
+    
+    # Verificar BTRFS
+    local btrfs_available=false
+    if command -v mkfs.btrfs &> /dev/null && command -v btrfs &> /dev/null; then
+        btrfs_available=true
+        show_message "✓ BTRFS: Disponible"
+    else
+        show_warning "✗ BTRFS: No disponible"
+        packages_to_install+=("btrfs-progs")
+        missing_packages="$missing_packages btrfs-progs"
+    fi
+    
+    # Verificar ZFS
+    local zfs_available=false
+    if command -v zpool &> /dev/null && command -v zfs &> /dev/null; then
+        zfs_available=true
+        show_message "✓ ZFS: Disponible"
+    else
+        show_warning "✗ ZFS: No disponible"
+        packages_to_install+=("zfsutils-linux")
+        missing_packages="$missing_packages zfsutils-linux"
+    fi
+    
+    # Verificar mdadm (útil para limpieza)
+    if ! command -v mdadm &> /dev/null; then
+        packages_to_install+=("mdadm")
+        missing_packages="$missing_packages mdadm"
+    fi
+    
+    # Si no hay herramientas RAID disponibles, no podemos continuar
+    if [ "$btrfs_available" = false ] && [ "$zfs_available" = false ]; then
+        show_error "No hay herramientas RAID disponibles en el sistema"
+        show_message "Se instalarán los paquetes necesarios..."
+    fi
+    
+    # Instalar paquetes faltantes si es necesario
+    if [ ${#packages_to_install[@]} -gt 0 ]; then
+        show_message "Paquetes que se instalarán:$missing_packages"
+        
+        # Verificar si ZFS está en la lista
+        local installing_zfs=false
+        for package in "${packages_to_install[@]}"; do
+            if [ "$package" = "zfsutils-linux" ]; then
+                installing_zfs=true
+                break
+            fi
+        done
+        
+        if [ "$installing_zfs" = true ]; then
+            show_warning "⚠️  ZFS puede tardar hasta 10 minutos en instalarse debido a la compilación de módulos del kernel"
+            show_warning "⚠️  Durante la instalación verás el progreso en pantalla"
+            
+            if ! confirm "¿Deseas continuar con la instalación?"; then
+                show_message "Instalación cancelada por el usuario"
+                exit 0
+            fi
+        fi
+        
+        show_message "Iniciando instalación de paquetes..."
+        echo "----------------------------------------"
+        
+        # Instalar paquetes con output visible
+        for package in "${packages_to_install[@]}"; do
+            if [ "$package" = "zfsutils-linux" ]; then
+                show_message "🔄 Instalando ZFS (esto puede tomar varios minutos)..."
+                echo "📦 Progreso de instalación ZFS:"
+                if sudo apt install -y "$package"; then
+                    show_message "✅ ZFS instalado exitosamente"
+                else
+                    show_error "❌ Error instalando ZFS"
+                    exit 1
+                fi
+            else
+                show_message "🔄 Instalando $package..."
+                if sudo apt install -y "$package" > /dev/null 2>&1; then
+                    show_message "✅ $package instalado exitosamente"
+                else
+                    show_error "❌ Error instalando $package"
+                    exit 1
+                fi
+            fi
+        done
+        
+        echo "----------------------------------------"
+        show_message "✅ Todos los paquetes se instalaron correctamente"
+        
+        # Verificar que ZFS esté funcionando si se instaló
+        if [ "$installing_zfs" = true ]; then
+            show_message "🔄 Verificando funcionamiento de ZFS..."
+            
+            # Cargar módulo ZFS si no está cargado
+            if ! lsmod | grep -q "^zfs "; then
+                show_message "Cargando módulo ZFS..."
+                sudo modprobe zfs
+                sleep 2
+            fi
+            
+            # Verificar que los comandos funcionen
+            if zpool status > /dev/null 2>&1 && zfs version > /dev/null 2>&1; then
+                local zfs_version=$(zfs version | head -1 | awk '{print $2}')
+                show_message "✅ ZFS funcionando correctamente (versión: $zfs_version)"
+            else
+                show_error "❌ ZFS no está funcionando correctamente"
+                show_message "Puede ser necesario reiniciar el sistema"
+                if confirm "¿Deseas continuar de todas formas? (puede fallar)"; then
+                    show_warning "Continuando con ZFS posiblemente no funcional..."
+                else
+                    exit 1
+                fi
+            fi
+        fi
+        
+        # Breve pausa para que el usuario vea el resultado
+        sleep 1
+    else
+        show_message "✅ Todos los requisitos están disponibles"
+    fi
+    
+    # Mostrar resumen final de herramientas disponibles
+    show_message "Herramientas RAID disponibles:"
+    if command -v mkfs.btrfs &> /dev/null; then
+        local btrfs_version=$(btrfs --version 2>/dev/null | awk '{print $2}' || echo "desconocida")
+        echo "  ✓ BTRFS (versión: $btrfs_version)"
+    fi
+    
+    if command -v zpool &> /dev/null; then
+        local zfs_version=$(zfs version 2>/dev/null | head -1 | awk '{print $2}' || echo "desconocida")
+        echo "  ✓ ZFS (versión: $zfs_version)"
+    fi
+    
+    echo ""
+}
+
+# Función para detectar todas las configuraciones RAID existentes
+detect_existing_raid_configurations() {
+    show_title "Detección de Configuraciones RAID Existentes"
+    
+    local zfs_found=false
+    local btrfs_found=false
+    local mdadm_found=false
+    local lvm_found=false
+    local any_raid_found=false
+    
+    # 1. DETECTAR ZFS
+    if command -v zpool &> /dev/null; then
+        # Verificar que el módulo ZFS esté cargado
+        if ! lsmod | grep -q "^zfs "; then
+            sudo modprobe zfs 2>/dev/null || true
+            sleep 1
+        fi
+        
+        local existing_pools=$(zpool list -H -o name 2>/dev/null)
+        if [ -n "$existing_pools" ]; then
+            zfs_found=true
+            any_raid_found=true
+            
+            echo ""
+            echo "🔷 POOLS ZFS DETECTADOS:"
+            for pool in $existing_pools; do
+                local pool_health=$(zpool list -H -o health "$pool" 2>/dev/null)
+                local pool_size=$(zpool list -H -o size "$pool" 2>/dev/null)
+                local pool_used=$(zpool list -H -o allocated "$pool" 2>/dev/null)
+                local pool_free=$(zpool list -H -o free "$pool" 2>/dev/null)
+                
+                echo "  📦 Pool: $pool"
+                echo "     💚 Estado: $pool_health"
+                echo "     📏 Tamaño: $pool_size (Usado: $pool_used, Libre: $pool_free)"
+                
+                # Mostrar datasets existentes
+                local datasets=$(zfs list -H -o name -r "$pool" 2>/dev/null | grep -v "^${pool}$")
+                if [ -n "$datasets" ]; then
+                    local dataset_count=$(echo "$datasets" | wc -l)
+                    echo "     📁 Datasets: $dataset_count"
+                    for dataset in $datasets; do
+                        local used=$(zfs list -H -o used "$dataset" 2>/dev/null)
+                        local mountpoint=$(zfs list -H -o mountpoint "$dataset" 2>/dev/null)
+                        echo "       • $dataset (Usado: $used, Montaje: $mountpoint)"
+                    done
+                else
+                    echo "     📁 Sin datasets (solo pool raíz)"
+                fi
+                
+                # Mostrar dispositivos del pool
+                local pool_devices=$(zpool status "$pool" 2>/dev/null | grep -E "^\s+[a-z]" | awk '{print $1}' | grep -v "raidz\|mirror\|spare\|log\|cache\|replacing" | head -3)
+                if [ -n "$pool_devices" ]; then
+                    echo "     💿 Dispositivos: $(echo $pool_devices | tr '\n' ' ' | sed 's/ *$//')..."
+                fi
+                echo ""
+            done
+        fi
+    fi
+    
+    # 2. DETECTAR BTRFS
+    if command -v btrfs &> /dev/null; then
+        local btrfs_devices=()
+        local btrfs_info=()
+        
+        # Buscar en todos los dispositivos
+        for device in $(lsblk -dpno NAME | grep -E "sd[a-z]|nvme"); do
+            if btrfs filesystem show "$device" 2>/dev/null | grep -q "uuid:"; then
+                local device_name=$(basename "$device")
+                local btrfs_uuid=$(btrfs filesystem show "$device" 2>/dev/null | grep "uuid:" | awk '{print $4}')
+                local size=$(lsblk -dpno SIZE "$device" | tr -d ' ')
+                local mount_point=$(mount | grep "$device" | awk '{print $3}' | head -1)
+                
+                btrfs_devices+=("$device_name")
+                if [ -n "$mount_point" ]; then
+                    btrfs_info+=("$device_name:$size:$mount_point:$btrfs_uuid")
+                else
+                    btrfs_info+=("$device_name:$size:no_montado:$btrfs_uuid")
+                fi
+            fi
+        done
+        
+        if [ ${#btrfs_devices[@]} -gt 0 ]; then
+            btrfs_found=true
+            any_raid_found=true
+            
+            echo ""
+            echo "🟠 FILESYSTEMS BTRFS DETECTADOS:"
+            for info in "${btrfs_info[@]}"; do
+                IFS=':' read -r device size mount_point uuid <<< "$info"
+                echo "  📦 Dispositivo: $device"
+                echo "     📏 Tamaño: $size"
+                echo "     📁 Montaje: $mount_point"
+                echo "     🆔 UUID: $uuid"
+                
+                # Mostrar información adicional de BTRFS si está montado
+                if [ "$mount_point" != "no_montado" ]; then
+                    local used=$(df -h "$mount_point" 2>/dev/null | tail -1 | awk '{print $3}')
+                    local available=$(df -h "$mount_point" 2>/dev/null | tail -1 | awk '{print $4}')
+                    if [ -n "$used" ]; then
+                        echo "     📊 Usado: $used, Disponible: $available"
+                    fi
+                    
+                    # Verificar subvolúmenes
+                    local subvolumes=$(btrfs subvolume list "$mount_point" 2>/dev/null | wc -l)
+                    if [ "$subvolumes" -gt 0 ]; then
+                        echo "     📂 Subvolúmenes: $subvolumes"
+                    fi
+                fi
+                echo ""
+            done
+        fi
+    fi
+    
+    # 3. DETECTAR MDADM (Linux Software RAID)
+    if command -v mdadm &> /dev/null; then
+        local mdadm_arrays=$(cat /proc/mdstat 2>/dev/null | grep "^md" | awk '{print $1}')
+        if [ -n "$mdadm_arrays" ]; then
+            mdadm_found=true
+            any_raid_found=true
+            
+            echo ""
+            echo "🔴 ARRAYS MDADM DETECTADOS:"
+            for array in $mdadm_arrays; do
+                local array_info=$(mdadm --detail "/dev/$array" 2>/dev/null)
+                if [ -n "$array_info" ]; then
+                    local raid_level=$(echo "$array_info" | grep "Raid Level" | awk '{print $4}')
+                    local array_size=$(echo "$array_info" | grep "Array Size" | awk '{print $4$5}')
+                    local state=$(echo "$array_info" | grep "State" | awk '{print $3}')
+                    local num_devices=$(echo "$array_info" | grep "Total Devices" | awk '{print $4}')
+                    
+                    echo "  📦 Array: /dev/$array"
+                    echo "     🔧 Nivel RAID: $raid_level"
+                    echo "     📏 Tamaño: $array_size"
+                    echo "     💚 Estado: $state"
+                    echo "     💿 Dispositivos: $num_devices"
+                    
+                    # Mostrar dispositivos del array
+                    local devices=$(echo "$array_info" | grep "/dev/" | grep -v "failed\|spare" | awk '{print $7}' | head -3)
+                    if [ -n "$devices" ]; then
+                        echo "     💿 Miembros: $(echo $devices | tr '\n' ' ' | sed 's/ *$//')..."
+                    fi
+                    echo ""
+                fi
+            done
+        fi
+    fi
+    
+    # 4. DETECTAR LVM
+    if command -v vgdisplay &> /dev/null; then
+        local volume_groups=$(vgdisplay 2>/dev/null | grep "VG Name" | awk '{print $3}')
+        if [ -n "$volume_groups" ]; then
+            lvm_found=true
+            any_raid_found=true
+            
+            echo ""
+            echo "🟣 VOLUME GROUPS LVM DETECTADOS:"
+            for vg in $volume_groups; do
+                local vg_info=$(vgdisplay "$vg" 2>/dev/null)
+                if [ -n "$vg_info" ]; then
+                    local vg_size=$(echo "$vg_info" | grep "VG Size" | awk '{print $3$4}')
+                    local vg_free=$(echo "$vg_info" | grep "Free  PE" | awk '{print $5$6}')
+                    local pv_count=$(echo "$vg_info" | grep "Cur PV" | awk '{print $3}')
+                    local lv_count=$(echo "$vg_info" | grep "Cur LV" | awk '{print $3}')
+                    
+                    echo "  📦 Volume Group: $vg"
+                    echo "     📏 Tamaño: $vg_size"
+                    echo "     💾 Libre: $vg_free"
+                    echo "     💿 Physical Volumes: $pv_count"
+                    echo "     📁 Logical Volumes: $lv_count"
+                    
+                    # Mostrar logical volumes
+                    local logical_volumes=$(lvdisplay "$vg" 2>/dev/null | grep "LV Name" | awk '{print $3}' | head -3)
+                    if [ -n "$logical_volumes" ]; then
+                        echo "     📂 LVs: $(echo $logical_volumes | tr '\n' ' ' | sed 's/ *$//')..."
+                    fi
+                    echo ""
+                fi
+            done
+        fi
+    fi
+    
+    # MOSTRAR RESUMEN Y OPCIONES
+    if [ "$any_raid_found" = true ]; then
+        echo "═══════════════════════════════════════════════════════════════════"
+        echo ""
+        echo "🛠️  OPCIONES DISPONIBLES:"
+        
+        local option_number=1
+        
+        if [ "$zfs_found" = true ]; then
+            echo "   $option_number. Gestionar pools y datasets ZFS"
+            zfs_option=$option_number
+            ((option_number++))
+            
+            echo "   $option_number. Eliminar pools ZFS específicos"
+            zfs_delete_option=$option_number
+            ((option_number++))
+        fi
+        
+        if [ "$btrfs_found" = true ]; then
+            echo "   $option_number. Eliminar filesystems BTRFS específicos"
+            btrfs_option=$option_number
+            ((option_number++))
+        fi
+        
+        if [ "$mdadm_found" = true ]; then
+            echo "   $option_number. Gestionar arrays MDADM (información solamente)"
+            mdadm_option=$option_number
+            ((option_number++))
+        fi
+        
+        if [ "$lvm_found" = true ]; then
+            echo "   $option_number. Gestionar Volume Groups LVM (información solamente)"
+            lvm_option=$option_number
+            ((option_number++))
+        fi
+        
+        echo "   $option_number. Continuar con configuración de nuevo RAID"
+        continue_option=$option_number
+        ((option_number++))
+        
+        echo "   $option_number. Salir del script"
+        exit_option=$option_number
+        echo ""
+        
+        while true; do
+            read -p "👉 Selecciona una opción (1-$exit_option): " choice
+            
+            if [ "$zfs_found" = true ] && [ "$choice" = "$zfs_option" ]; then
+                manage_existing_pools_datasets
+                return 1  # Indica que se gestionaron configuraciones existentes
+            elif [ "$zfs_found" = true ] && [ "$choice" = "$zfs_delete_option" ]; then
+                delete_existing_zfs_pools
+                return 1  # Indica que se eliminaron pools
+            elif [ "$btrfs_found" = true ] && [ "$choice" = "$btrfs_option" ]; then
+                local btrfs_devices_array=()
+                for info in "${btrfs_info[@]}"; do
+                    IFS=':' read -r device size mount_point uuid <<< "$info"
+                    btrfs_devices_array+=("$device")
+                done
+                delete_existing_btrfs "${btrfs_devices_array[@]}"
+                return 1  # Indica que se eliminaron filesystems
+            elif [ "$mdadm_found" = true ] && [ "$choice" = "$mdadm_option" ]; then
+                show_mdadm_details
+                echo ""
+                echo "Para gestionar arrays MDADM, usa herramientas específicas como:"
+                echo "  • mdadm --detail /dev/mdX"
+                echo "  • mdadm --stop /dev/mdX"
+                echo "  • mdadm --manage /dev/mdX --fail /dev/sdX"
+                echo ""
+                if confirm "¿Continuar con la detección de configuraciones?"; then
+                    detect_existing_raid_configurations
+                    return $?
+                else
+                    return 1
+                fi
+            elif [ "$lvm_found" = true ] && [ "$choice" = "$lvm_option" ]; then
+                show_lvm_details
+                echo ""
+                echo "Para gestionar LVM, usa herramientas específicas como:"
+                echo "  • lvdisplay, vgdisplay, pvdisplay"
+                echo "  • lvextend, lvreduce"
+                echo "  • vgextend, vgreduce"
+                echo ""
+                if confirm "¿Continuar con la detección de configuraciones?"; then
+                    detect_existing_raid_configurations
+                    return $?
+                else
+                    return 1
+                fi
+            elif [ "$choice" = "$continue_option" ]; then
+                show_message "Continuando con configuración de nuevo RAID..."
+                return 0  # Continúa con el flujo normal
+            elif [ "$choice" = "$exit_option" ]; then
+                show_message "Saliendo del script..."
+                exit 0
+            else
+                echo "❌ Opción inválida. Selecciona un número válido."
+            fi
+        done
+    else
+        echo ""
+        echo "ℹ️  No se detectaron configuraciones RAID existentes."
+        echo "   El sistema está listo para configurar un nuevo RAID."
+        echo ""
+        return 0  # Continúa con configuración normal
+    fi
+}
+
+# Función para mostrar detalles de arrays MDADM
+show_mdadm_details() {
+    show_title "Detalles de Arrays MDADM"
+    
+    local mdadm_arrays=$(cat /proc/mdstat 2>/dev/null | grep "^md" | awk '{print $1}')
+    if [ -z "$mdadm_arrays" ]; then
+        show_warning "No se encontraron arrays MDADM"
+        return 0
+    fi
+    
+    for array in $mdadm_arrays; do
+        echo ""
+        echo "📦 ARRAY: /dev/$array"
+        echo "═══════════════════════════════════════════"
+        
+        # Información detallada del array
+        local array_info=$(mdadm --detail "/dev/$array" 2>/dev/null)
+        if [ -n "$array_info" ]; then
+            echo "$array_info"
+        else
+            echo "❌ No se pudo obtener información detallada del array"
+        fi
+        
+        echo ""
+        echo "📊 ESTADO EN /proc/mdstat:"
+        echo "═══════════════════════════════════════════"
+        cat /proc/mdstat | grep -A 3 "^$array"
+        echo ""
+    done
+}
+
+# Función para mostrar detalles de Volume Groups LVM
+show_lvm_details() {
+    show_title "Detalles de Volume Groups LVM"
+    
+    local volume_groups=$(vgdisplay 2>/dev/null | grep "VG Name" | awk '{print $3}')
+    if [ -z "$volume_groups" ]; then
+        show_warning "No se encontraron Volume Groups LVM"
+        return 0
+    fi
+    
+    for vg in $volume_groups; do
+        echo ""
+        echo "📦 VOLUME GROUP: $vg"
+        echo "═══════════════════════════════════════════"
+        
+        # Información detallada del VG
+        vgdisplay "$vg" 2>/dev/null
+        
+        echo ""
+        echo "📁 LOGICAL VOLUMES EN $vg:"
+        echo "═══════════════════════════════════════════"
+        lvdisplay "$vg" 2>/dev/null
+        
+        echo ""
+        echo "💿 PHYSICAL VOLUMES EN $vg:"
+        echo "═══════════════════════════════════════════"
+        pvdisplay 2>/dev/null | grep -A 10 "$vg" | head -15
+        echo ""
+    done
+}
+
+# Función para eliminar pools ZFS existentes
+delete_existing_zfs_pools() {
+    show_title "Eliminación de Pools ZFS Existentes"
+    
+    local existing_pools=$(zpool list -H -o name 2>/dev/null)
+    if [ -z "$existing_pools" ]; then
+        show_warning "No se encontraron pools ZFS para eliminar"
+        return 0
+    fi
+    
+    local pools_array=($existing_pools)
+    
+    echo "⚠️  ADVERTENCIA: Esta operación eliminará completamente los pools seleccionados"
+    echo "🔥 TODOS LOS DATOS SE PERDERÁN PERMANENTEMENTE"
+    echo ""
+    
+    echo "Pools ZFS disponibles para eliminar:"
+    for i in "${!pools_array[@]}"; do
+        local pool="${pools_array[$i]}"
+        local pool_health=$(zpool list -H -o health "$pool" 2>/dev/null)
+        local pool_size=$(zpool list -H -o size "$pool" 2>/dev/null)
+        local pool_used=$(zpool list -H -o allocated "$pool" 2>/dev/null)
+        
+        echo "  $((i+1)). $pool"
+        echo "     💚 Estado: $pool_health | 📊 Tamaño: $pool_size | 📈 Usado: $pool_used"
+        
+        # Mostrar datasets
+        local datasets=$(zfs list -H -o name -r "$pool" 2>/dev/null | grep -v "^${pool}$")
+        if [ -n "$datasets" ]; then
+            local dataset_count=$(echo "$datasets" | wc -l)
+            echo "     📁 Datasets: $dataset_count"
+        fi
+    done
+    
+    echo ""
+    echo "Opciones de eliminación:"
+    echo "  • Número del pool (ej: 1, 2, 3)"
+    echo "  • Múltiples pools separados por espacios (ej: 1 3 4)"
+    echo "  • 'all' - Eliminar TODOS los pools (¡PELIGROSO!)"
+    echo "  • 'cancel' - Cancelar operación"
+    echo ""
+    
+    while true; do
+        read -p "👉 Pools a eliminar: " choice
+        
+        if [ "$choice" = "cancel" ]; then
+            show_message "Operación cancelada por el usuario"
+            return 0
+        elif [ "$choice" = "all" ]; then
+            show_warning "⚠️  ¡ADVERTENCIA! Vas a eliminar TODOS los pools ZFS"
+            show_warning "⚠️  Esto incluye: ${pools_array[*]}"
+            
+            if confirm "¿Estás ABSOLUTAMENTE SEGURO de eliminar TODOS los pools?"; then
+                for pool in "${pools_array[@]}"; do
+                    echo ""
+                    destroy_zfs_pool_safely "$pool"
+                done
+                show_message "✅ Todos los pools han sido procesados"
+                return 0
+            else
+                show_message "Eliminación masiva cancelada"
+                continue
+            fi
+        elif [[ "$choice" =~ ^[0-9\ ]+$ ]]; then
+            # Validar selecciones
+            local valid_selections=()
+            local invalid_found=false
+            
+            for num in $choice; do
+                if [[ "$num" =~ ^[0-9]+$ ]] && [ "$num" -ge 1 ] && [ "$num" -le ${#pools_array[@]} ]; then
+                    local pool_index=$((num-1))
+                    local pool_name="${pools_array[$pool_index]}"
+                    if [[ ! " ${valid_selections[*]} " =~ " ${pool_name} " ]]; then
+                        valid_selections+=("$pool_name")
+                    fi
+                else
+                    echo "❌ Selección inválida: $num (usa números del 1 al ${#pools_array[@]})"
+                    invalid_found=true
+                fi
+            done
+            
+            if [ "$invalid_found" = true ]; then
+                continue
+            fi
+            
+            if [ ${#valid_selections[@]} -eq 0 ]; then
+                show_error "No se seleccionaron pools válidos"
+                continue
+            fi
+            
+            # Mostrar resumen de pools a eliminar
+            echo ""
+            show_warning "Pools seleccionados para eliminación:"
+            for pool in "${valid_selections[@]}"; do
+                local pool_size=$(zpool list -H -o size "$pool" 2>/dev/null)
+                local pool_used=$(zpool list -H -o allocated "$pool" 2>/dev/null)
+                echo "  🗑️  $pool (Tamaño: $pool_size, Usado: $pool_used)"
+            done
+            
+            echo ""
+            if confirm "¿Confirmas la eliminación de estos ${#valid_selections[@]} pools?"; then
+                for pool in "${valid_selections[@]}"; do
+                    echo ""
+                    destroy_zfs_pool_safely "$pool"
+                done
+                show_message "✅ Pools seleccionados han sido procesados"
+                return 0
+            else
+                show_message "Eliminación cancelada"
+                continue
+            fi
+        else
+            echo "❌ Opción inválida. Usa números, 'all' o 'cancel'"
+        fi
+    done
+}
+
+# Función para detectar y gestionar filesystems BTRFS existentes
+detect_and_manage_btrfs() {
+    if ! command -v btrfs &> /dev/null; then
+        return 0
+    fi
+    
+    # Buscar filesystems BTRFS existentes
+    local btrfs_devices=()
+    local btrfs_info=()
+    
+    # Buscar en todos los dispositivos
+    for device in $(lsblk -dpno NAME | grep -E "sd[a-z]|nvme"); do
+        if btrfs filesystem show "$device" 2>/dev/null | grep -q "uuid:"; then
+            local device_name=$(basename "$device")
+            local btrfs_uuid=$(btrfs filesystem show "$device" 2>/dev/null | grep "uuid:" | awk '{print $4}')
+            local size=$(lsblk -dpno SIZE "$device" | tr -d ' ')
+            local mount_point=$(mount | grep "$device" | awk '{print $3}' | head -1)
+            
+            btrfs_devices+=("$device_name")
+            if [ -n "$mount_point" ]; then
+                btrfs_info+=("$device_name:$size:$mount_point:$btrfs_uuid")
+            else
+                btrfs_info+=("$device_name:$size:no_montado:$btrfs_uuid")
+            fi
+        fi
+    done
+    
+    if [ ${#btrfs_devices[@]} -gt 0 ]; then
+        show_title "Filesystems BTRFS Existentes Detectados"
+        echo ""
+        echo "Se encontraron los siguientes filesystems BTRFS:"
+        
+        for info in "${btrfs_info[@]}"; do
+            IFS=':' read -r device size mount_point uuid <<< "$info"
+            echo "  📦 Dispositivo: $device"
+            echo "     📏 Tamaño: $size"
+            echo "     📁 Montaje: $mount_point"
+            echo "     🆔 UUID: $uuid"
+            echo ""
+        done
+        
+        echo "🛠️  OPCIONES PARA BTRFS:"
+        echo "   1. Eliminar filesystems BTRFS específicos"
+        echo "   2. Continuar sin modificar BTRFS"
+        echo ""
+        
+        while true; do
+            read -p "👉 Selecciona una opción (1-2): " choice
+            case $choice in
+                1)
+                    delete_existing_btrfs "${btrfs_devices[@]}"
+                    break
+                    ;;
+                2)
+                    show_message "Continuando sin modificar filesystems BTRFS..."
+                    break
+                    ;;
+                *)
+                    echo "❌ Opción inválida. Selecciona 1 o 2."
+                    ;;
+            esac
+        done
+    fi
+    
+    return 0
+}
+
+# Función para eliminar filesystems BTRFS existentes
+delete_existing_btrfs() {
+    local btrfs_devices=("$@")
+    
+    show_title "Eliminación de Filesystems BTRFS"
+    
+    echo "⚠️  ADVERTENCIA: Esta operación eliminará completamente los filesystems seleccionados"
+    echo "🔥 TODOS LOS DATOS SE PERDERÁN PERMANENTEMENTE"
+    echo ""
+    
+    echo "Filesystems BTRFS disponibles para eliminar:"
+    for i in "${!btrfs_devices[@]}"; do
+        local device="${btrfs_devices[$i]}"
+        local size=$(lsblk -dpno SIZE "/dev/$device" | tr -d ' ')
+        local mount_point=$(mount | grep "/dev/$device" | awk '{print $3}' | head -1)
+        local uuid=$(btrfs filesystem show "/dev/$device" 2>/dev/null | grep "uuid:" | awk '{print $4}')
+        
+        echo "  $((i+1)). $device"
+        echo "     📏 Tamaño: $size"
+        if [ -n "$mount_point" ]; then
+            echo "     📁 Montado en: $mount_point"
+        else
+            echo "     📁 No montado"
+        fi
+        echo "     🆔 UUID: $uuid"
+    done
+    
+    echo ""
+    echo "Opciones de eliminación:"
+    echo "  • Número del dispositivo (ej: 1, 2, 3)"
+    echo "  • Múltiples dispositivos separados por espacios (ej: 1 3)"
+    echo "  • 'all' - Eliminar TODOS los filesystems BTRFS"
+    echo "  • 'cancel' - Cancelar operación"
+    echo ""
+    
+    while true; do
+        read -p "👉 Filesystems a eliminar: " choice
+        
+        if [ "$choice" = "cancel" ]; then
+            show_message "Operación cancelada por el usuario"
+            return 0
+        elif [ "$choice" = "all" ]; then
+            show_warning "⚠️  ¡ADVERTENCIA! Vas a eliminar TODOS los filesystems BTRFS"
+            show_warning "⚠️  Esto incluye: ${btrfs_devices[*]}"
+            
+            if confirm "¿Estás ABSOLUTAMENTE SEGURO de eliminar TODOS los filesystems BTRFS?"; then
+                # Agrupar dispositivos por UUID para manejar arrays multi-disco
+                local processed_uuids=()
+                
+                for device in "${btrfs_devices[@]}"; do
+                    local device_uuid=$(sudo btrfs filesystem show "/dev/$device" 2>/dev/null | grep "uuid:" | awk '{print $4}')
+                    
+                    # Verificar si ya procesamos este UUID
+                    if [[ ! " ${processed_uuids[*]} " =~ " ${device_uuid} " ]]; then
+                        processed_uuids+=("$device_uuid")
+                        
+                        # Obtener todos los dispositivos del array con este UUID
+                        local array_devices=$(sudo btrfs filesystem show "/dev/$device" 2>/dev/null | grep "devid" | awk '{print $NF}' | sed 's|/dev/||')
+                        
+                        echo ""
+                        show_warning "🗑️  Eliminando array BTRFS (UUID: $device_uuid)"
+                        show_message "📀 Dispositivos del array: $array_devices"
+                        
+                        # Usar el primer dispositivo para la eliminación (que limpiará todo el array)
+                        destroy_btrfs_array_safely "$device" "$device_uuid"
+                    fi
+                done
+                show_message "✅ Todos los filesystems BTRFS han sido procesados"
+                return 0
+            else
+                show_message "Eliminación masiva cancelada"
+                continue
+            fi
+        elif [[ "$choice" =~ ^[0-9\ ]+$ ]]; then
+            # Validar selecciones
+            local valid_selections=()
+            local invalid_found=false
+            
+            for num in $choice; do
+                if [[ "$num" =~ ^[0-9]+$ ]] && [ "$num" -ge 1 ] && [ "$num" -le ${#btrfs_devices[@]} ]; then
+                    local device_index=$((num-1))
+                    local device_name="${btrfs_devices[$device_index]}"
+                    if [[ ! " ${valid_selections[*]} " =~ " ${device_name} " ]]; then
+                        valid_selections+=("$device_name")
+                    fi
+                else
+                    echo "❌ Selección inválida: $num (usa números del 1 al ${#btrfs_devices[@]})"
+                    invalid_found=true
+                fi
+            done
+            
+            if [ "$invalid_found" = true ]; then
+                continue
+            fi
+            
+            if [ ${#valid_selections[@]} -eq 0 ]; then
+                show_error "No se seleccionaron dispositivos válidos"
+                continue
+            fi
+            
+            # Mostrar resumen de dispositivos a eliminar
+            echo ""
+            show_warning "Filesystems BTRFS seleccionados para eliminación:"
+            for device in "${valid_selections[@]}"; do
+                local size=$(lsblk -dpno SIZE "/dev/$device" | tr -d ' ')
+                echo "  🗑️  $device (Tamaño: $size)"
+            done
+            
+            echo ""
+            if confirm "¿Confirmas la eliminación de estos ${#valid_selections[@]} filesystems?"; then
+                # Agrupar dispositivos por UUID para manejar arrays multi-disco
+                local processed_uuids=()
+                
+                for device in "${valid_selections[@]}"; do
+                    local device_uuid=$(sudo btrfs filesystem show "/dev/$device" 2>/dev/null | grep "uuid:" | awk '{print $4}')
+                    
+                    # Verificar si ya procesamos este UUID
+                    if [[ ! " ${processed_uuids[*]} " =~ " ${device_uuid} " ]]; then
+                        processed_uuids+=("$device_uuid")
+                        
+                        # Obtener información del array
+                        local btrfs_info=$(sudo btrfs filesystem show "/dev/$device" 2>/dev/null)
+                        local total_devices=$(echo "$btrfs_info" | grep "Total devices" | awk '{print $3}')
+                        
+                        echo ""
+                        if [ "$total_devices" -gt 1 ]; then
+                            # Es un array multi-disco, usar la función de array
+                            destroy_btrfs_array_safely "$device" "$device_uuid"
+                        else
+                            # Es un disco individual, usar la función tradicional
+                            destroy_btrfs_safely "$device"
+                        fi
+                    fi
+                done
+                show_message "✅ Filesystems BTRFS seleccionados han sido procesados"
+                return 0
+            else
+                show_message "Eliminación cancelada"
+                continue
+            fi
+        else
+            echo "❌ Opción inválida. Usa números, 'all' o 'cancel'"
+        fi
+    done
+}
+
+# Función para gestionar datasets de pools existentes
+manage_existing_pools_datasets() {
+    show_title "Gestión de Datasets en Pools Existentes"
+    
+    local existing_pools=$(zpool list -H -o name 2>/dev/null)
+    local pools_array=($existing_pools)
+    
+    echo "Selecciona el pool donde quieres gestionar datasets:"
+    for i in "${!pools_array[@]}"; do
+        local pool="${pools_array[$i]}"
+        local pool_health=$(zpool list -H -o health "$pool" 2>/dev/null)
+        local pool_free=$(zpool list -H -o free "$pool" 2>/dev/null)
+        echo "  $((i+1)). $pool (Estado: $pool_health, Libre: $pool_free)"
+    done
+    echo ""
+    
+    while true; do
+        read -p "👉 Selecciona pool (1-${#pools_array[@]}): " pool_choice
+        if [[ "$pool_choice" =~ ^[0-9]+$ ]] && [ "$pool_choice" -ge 1 ] && [ "$pool_choice" -le ${#pools_array[@]} ]; then
+            local selected_pool="${pools_array[$((pool_choice-1))]}"
+            create_datasets_in_pool "$selected_pool"
+            break
+        else
+            echo "❌ Selección inválida. Usa números del 1 al ${#pools_array[@]}."
+        fi
+    done
+    
+    # Preguntar si quiere gestionar otro pool
+    if [ ${#pools_array[@]} -gt 1 ]; then
+        if confirm "¿Deseas gestionar datasets en otro pool?"; then
+            manage_existing_pools_datasets
+        fi
+    fi
+}
+
+# Función para eliminar datasets de un pool específico
+delete_dataset_from_pool() {
+    local pool_name="$1"
+    
+    show_title "Eliminación de Datasets en Pool '$pool_name'"
+    
+    # Obtener datasets existentes (excluyendo el pool raíz)
+    local existing_datasets=$(zfs list -H -o name -r "$pool_name" 2>/dev/null | grep -v "^${pool_name}$")
+    
+    if [ -z "$existing_datasets" ]; then
+        show_warning "No hay datasets para eliminar en el pool '$pool_name'"
+        echo "Solo existe el pool raíz que no puede ser eliminado desde aquí."
+        return 0
+    fi
+    
+    # Convertir a array para manejo más fácil
+    local datasets_array=()
+    while IFS= read -r dataset; do
+        datasets_array+=("$dataset")
+    done <<< "$existing_datasets"
+    
+    echo ""
+    echo "⚠️  ADVERTENCIA: La eliminación de datasets es PERMANENTE"
+    echo "🔥 TODOS LOS DATOS del dataset seleccionado se perderán"
+    echo ""
+    echo "📁 Datasets disponibles para eliminar:"
+    
+    for i in "${!datasets_array[@]}"; do
+        local dataset="${datasets_array[$i]}"
+        local used=$(zfs list -H -o used "$dataset" 2>/dev/null)
+        local mountpoint=$(zfs list -H -o mountpoint "$dataset" 2>/dev/null)
+        local compression=$(zfs get -H -o value compression "$dataset" 2>/dev/null)
+        
+        echo "  $((i+1)). $dataset"
+        echo "     📊 Usado: $used | 📁 Montaje: $mountpoint | 🗜️ Compresión: $compression"
+        
+        # Mostrar snapshots si existen
+        local snapshots=$(zfs list -t snapshot -H -o name "$dataset" 2>/dev/null | wc -l)
+        if [ "$snapshots" -gt 0 ]; then
+            echo "     📸 Snapshots: $snapshots (también serán eliminados)"
+        fi
+        echo ""
+    done
+    
+    echo "Opciones de eliminación:"
+    echo "  • Número del dataset (ej: 1, 2, 3)"
+    echo "  • Múltiples datasets separados por espacios (ej: 1 3 4)"
+    echo "  • 'all' - Eliminar TODOS los datasets (¡PELIGROSO!)"
+    echo "  • 'cancel' - Cancelar operación"
+    echo ""
+    
+    while true; do
+        read -p "👉 Datasets a eliminar: " choice
+        
+        if [ "$choice" = "cancel" ]; then
+            show_message "Eliminación cancelada por el usuario"
+            return 0
+        elif [ "$choice" = "all" ]; then
+            show_warning "⚠️  ¡ADVERTENCIA! Vas a eliminar TODOS los datasets"
+            show_warning "⚠️  Esto incluye: ${datasets_array[*]}"
+            echo ""
+            echo "🔥 ESTO ELIMINARÁ PERMANENTEMENTE:"
+            for dataset in "${datasets_array[@]}"; do
+                local used=$(zfs list -H -o used "$dataset" 2>/dev/null)
+                echo "   • $dataset (Usado: $used)"
+            done
+            echo ""
+            
+            if confirm "¿Estás ABSOLUTAMENTE SEGURO de eliminar TODOS los datasets?"; then
+                # Eliminar en orden inverso para manejar dependencias
+                for ((i=${#datasets_array[@]}-1; i>=0; i--)); do
+                    local dataset="${datasets_array[$i]}"
+                    echo ""
+                    delete_dataset_safely "$dataset"
+                done
+                show_message "✅ Todos los datasets han sido procesados"
+                return 0
+            else
+                show_message "Eliminación masiva cancelada"
+                continue
+            fi
+        elif [[ "$choice" =~ ^[0-9\ ]+$ ]]; then
+            # Validar selecciones
+            local valid_selections=()
+            local invalid_found=false
+            
+            for num in $choice; do
+                if [[ "$num" =~ ^[0-9]+$ ]] && [ "$num" -ge 1 ] && [ "$num" -le ${#datasets_array[@]} ]; then
+                    local dataset_index=$((num-1))
+                    local dataset_name="${datasets_array[$dataset_index]}"
+                    if [[ ! " ${valid_selections[*]} " =~ " ${dataset_name} " ]]; then
+                        valid_selections+=("$dataset_name")
+                    fi
+                else
+                    echo "❌ Selección inválida: $num (usa números del 1 al ${#datasets_array[@]})"
+                    invalid_found=true
+                fi
+            done
+            
+            if [ "$invalid_found" = true ]; then
+                continue
+            fi
+            
+            if [ ${#valid_selections[@]} -eq 0 ]; then
+                show_error "No se seleccionaron datasets válidos"
+                continue
+            fi
+            
+            # Mostrar resumen de datasets a eliminar
+            echo ""
+            show_warning "Datasets seleccionados para eliminación:"
+            for dataset in "${valid_selections[@]}"; do
+                local used=$(zfs list -H -o used "$dataset" 2>/dev/null)
+                local snapshots=$(zfs list -t snapshot -H -o name "$dataset" 2>/dev/null | wc -l)
+                echo "  🗑️  $dataset (Usado: $used)"
+                if [ "$snapshots" -gt 0 ]; then
+                    echo "      📸 Incluye $snapshots snapshots"
+                fi
+            done
+            
+            echo ""
+            if confirm "¿Confirmas la eliminación de estos ${#valid_selections[@]} datasets?"; then
+                # Ordenar datasets para eliminar los más profundos primero
+                # (importante para evitar errores de dependencias)
+                local sorted_selections=($(printf '%s\n' "${valid_selections[@]}" | sort -r))
+                
+                for dataset in "${sorted_selections[@]}"; do
+                    echo ""
+                    delete_dataset_safely "$dataset"
+                done
+                show_message "✅ Datasets seleccionados han sido procesados"
+                return 0
+            else
+                show_message "Eliminación cancelada"
+                continue
+            fi
+        else
+            echo "❌ Opción inválida. Usa números, 'all' o 'cancel'"
+        fi
+    done
+}
+
+# Función para eliminar un dataset de forma segura
+delete_dataset_safely() {
+    local dataset="$1"
+    
+    if [ -z "$dataset" ]; then
+        show_error "Nombre de dataset no especificado"
+        return 1
+    fi
+    
+    # Verificar que el dataset existe
+    if ! zfs list "$dataset" >/dev/null 2>&1; then
+        show_warning "Dataset '$dataset' no encontrado"
+        return 0
+    fi
+    
+    show_warning "🗑️  Eliminando dataset: '$dataset'"
+    
+    # Mostrar información del dataset antes de eliminar
+    local used=$(zfs list -H -o used "$dataset" 2>/dev/null)
+    local mountpoint=$(zfs list -H -o mountpoint "$dataset" 2>/dev/null)
+    local compression=$(zfs get -H -o value compression "$dataset" 2>/dev/null)
+    
+    echo "   📊 Datos a eliminar: $used"
+    echo "   📁 Punto de montaje: $mountpoint"
+    echo "   🗜️  Compresión: $compression"
+    
+    # Verificar y mostrar snapshots
+    local snapshots=$(zfs list -t snapshot -H -o name "$dataset" 2>/dev/null)
+    if [ -n "$snapshots" ]; then
+        local snapshot_count=$(echo "$snapshots" | wc -l)
+        echo "   📸 Snapshots a eliminar: $snapshot_count"
+        for snapshot in $snapshots; do
+            local snap_used=$(zfs list -t snapshot -H -o used "$snapshot" 2>/dev/null)
+            echo "      • $snapshot (Usado: $snap_used)"
+        done
+    fi
+    
+    # Verificar si tiene datasets hijos
+    local child_datasets=$(zfs list -H -o name -r "$dataset" 2>/dev/null | grep -v "^${dataset}$")
+    if [ -n "$child_datasets" ]; then
+        echo "   📂 Datasets hijos que también serán eliminados:"
+        for child in $child_datasets; do
+            local child_used=$(zfs list -H -o used "$child" 2>/dev/null)
+            echo "      • $child (Usado: $child_used)"
+        done
+    fi
+    
+    echo ""
+    show_warning "⚠️  ESTA ACCIÓN ELIMINARÁ PERMANENTEMENTE:"
+    show_warning "    • El dataset '$dataset' y todos sus datos"
+    if [ -n "$snapshots" ]; then
+        show_warning "    • Todos los snapshots del dataset"
+    fi
+    if [ -n "$child_datasets" ]; then
+        show_warning "    • Todos los datasets hijos y sus datos"
+    fi
+    echo ""
+    
+    # Proceder con la eliminación
+    show_message "🔄 Eliminando dataset '$dataset'..."
+    
+    # 1. Desmontar el dataset si está montado
+    if [ "$mountpoint" != "none" ] && [ "$mountpoint" != "-" ]; then
+        show_message "Desmontando dataset..."
+        sudo zfs unmount "$dataset" 2>/dev/null || true
+    fi
+    
+    # 2. Eliminar el dataset con todos sus snapshots y descendientes
+    show_message "Destruyendo dataset y dependencias..."
+    if sudo zfs destroy -r "$dataset" 2>/dev/null; then
+        show_message "✅ Dataset '$dataset' eliminado exitosamente"
+    else
+        show_warning "⚠️  Intento estándar falló, intentando eliminación forzada..."
+        
+        # Intentar eliminación forzada
+        if sudo zfs destroy -f -r "$dataset" 2>/dev/null; then
+            show_message "✅ Dataset '$dataset' eliminado forzadamente"
+        else
+            show_error "❌ No se pudo eliminar el dataset '$dataset'"
+            show_error "    Posibles causas:"
+            show_error "    • Dataset en uso por algún proceso"
+            show_error "    • Dependencias de snapshots o clones"
+            show_error "    • Permisos insuficientes"
+            return 1
+        fi
+    fi
+    
+    return 0
+}
+
+# Función para crear datasets en un pool específico (reutilizable)
+create_datasets_in_pool() {
+    local pool_name="$1"
+    
+    show_title "Gestión de Datasets en Pool '$pool_name'"
+    echo ""
+    echo "💡 INFORMACIÓN SOBRE DATASETS:"
+    echo "   Los datasets son subdivisiones lógicas dentro del pool ZFS."
+    echo "   Beneficios:"
+    echo "   • Organización de datos (data, backups, media, etc.)"
+    echo "   • Cuotas de espacio independientes"
+    echo "   • Snapshots y backups granulares"
+    echo "   • Diferentes configuraciones de compresión"
+    echo "   • Puntos de montaje personalizados"
+    echo ""
+    echo "   Ejemplo: $pool_name/data, $pool_name/backups, $pool_name/media"
+    echo ""
+    
+    # Mostrar datasets existentes
+    local existing_datasets=$(zfs list -H -o name -r "$pool_name" 2>/dev/null | grep -v "^${pool_name}$")
+    if [ -n "$existing_datasets" ]; then
+        echo "📁 Datasets existentes en '$pool_name':"
+        for dataset in $existing_datasets; do
+            local used=$(zfs list -H -o used "$dataset" 2>/dev/null)
+            local mountpoint=$(zfs list -H -o mountpoint "$dataset" 2>/dev/null)
+            local compression=$(zfs get -H -o value compression "$dataset" 2>/dev/null)
+            echo "  ✓ $dataset"
+            echo "     📊 Usado: $used | 📁 Montaje: $mountpoint | 🗜️ Compresión: $compression"
+        done
+        echo ""
+    fi
+    
+    echo "📋 DATASETS COMUNES SUGERIDOS:"
+    echo "   1. data     - Datos principales y documentos"
+    echo "   2. media    - Videos, fotos, música"
+    echo "   3. backups  - Copias de seguridad"
+    echo "   4. temp     - Archivos temporales"
+    echo "   5. vm       - Máquinas virtuales"
+    echo "   6. docker   - Contenedores Docker"
+    echo "   7. homes    - Directorios de usuario"
+    echo ""
+    
+    local datasets_created=()
+    
+    while true; do
+        echo "Opciones:"
+        echo "  • Nombre del dataset (ej: data, media, backups)"
+        echo "  • 'suggested' - Crear datasets comunes (data, media, backups)"
+        echo "  • 'list' - Mostrar datasets actuales"
+        echo "  • 'delete' - Eliminar dataset existente"
+        echo "  • 'done' - Finalizar gestión de datasets"
+        echo ""
+        
+        read -p "👉 Dataset a crear/gestionar: " dataset_choice
+        
+        if [ "$dataset_choice" = "done" ]; then
+            break
+        elif [ "$dataset_choice" = "list" ]; then
+            # Mostrar datasets actuales
+            local current_datasets=$(zfs list -H -o name -r "$pool_name" 2>/dev/null | grep -v "^${pool_name}$")
+            if [ -n "$current_datasets" ]; then
+                echo ""
+                echo "📁 Datasets actuales en '$pool_name':"
+                for dataset in $current_datasets; do
+                    local used=$(zfs list -H -o used "$dataset" 2>/dev/null)
+                    local avail=$(zfs list -H -o avail "$dataset" 2>/dev/null)
+                    local mountpoint=$(zfs list -H -o mountpoint "$dataset" 2>/dev/null)
+                    echo "  ✓ $dataset (Usado: $used, Disponible: $avail, Montaje: $mountpoint)"
+                done
+                echo ""
+            else
+                echo "  (no hay datasets creados aún)"
+                echo ""
+            fi
+        elif [ "$dataset_choice" = "delete" ]; then
+            delete_dataset_from_pool "$pool_name"
+        elif [ "$dataset_choice" = "suggested" ]; then
+            local suggested_datasets=("data" "media" "backups")
+            
+            show_message "Creando datasets sugeridos: ${suggested_datasets[*]}"
+            
+            for dataset in "${suggested_datasets[@]}"; do
+                # Verificar si ya existe
+                if zfs list "$pool_name/$dataset" >/dev/null 2>&1; then
+                    show_message "ℹ️  Dataset '$pool_name/$dataset' ya existe"
+                    continue
+                fi
+                
+                show_message "Creando dataset: $pool_name/$dataset"
+                
+                if sudo zfs create "$pool_name/$dataset"; then
+                    datasets_created+=("$dataset")
+                    show_message "✅ Dataset '$pool_name/$dataset' creado exitosamente"
+                    
+                    # Configurar montaje automático
+                    sudo zfs set mountpoint="/$pool_name/$dataset" "$pool_name/$dataset"
+                    
+                    # Configuraciones específicas por tipo
+                    case $dataset in
+                        "media")
+                            # Optimizar para archivos grandes
+                            sudo zfs set recordsize=1M "$pool_name/$dataset"
+                            sudo zfs set compression=lz4 "$pool_name/$dataset"
+                            show_message "  📺 Optimizado para archivos multimedia"
+                            ;;
+                        "backups")
+                            # Máxima compresión para backups
+                            sudo zfs set compression=gzip "$pool_name/$dataset"
+                            sudo zfs set dedup=on "$pool_name/$dataset" 2>/dev/null || true
+                            show_message "  💾 Optimizado para backups (alta compresión)"
+                            ;;
+                        "data")
+                            # Balance entre compresión y rendimiento
+                            sudo zfs set compression=lz4 "$pool_name/$dataset"
+                            show_message "  📁 Optimizado para datos generales"
+                            ;;
+                    esac
+                else
+                    show_error "❌ Error creando dataset '$pool_name/$dataset'"
+                fi
+            done
+            
+        elif [ -n "$dataset_choice" ] && [[ "$dataset_choice" =~ ^[a-zA-Z0-9_-]+$ ]]; then
+            # Crear dataset individual
+            if zfs list "$pool_name/$dataset_choice" >/dev/null 2>&1; then
+                show_message "ℹ️  Dataset '$pool_name/$dataset_choice' ya existe"
+                continue
+            fi
+            
+            show_message "Creando dataset: $pool_name/$dataset_choice"
+            
+            if sudo zfs create "$pool_name/$dataset_choice"; then
+                datasets_created+=("$dataset_choice")
+                show_message "✅ Dataset '$pool_name/$dataset_choice' creado exitosamente"
+                
+                # Configurar montaje
+                sudo zfs set mountpoint="/$pool_name/$dataset_choice" "$pool_name/$dataset_choice"
+                
+                # Preguntar por configuraciones específicas
+                echo ""
+                echo "⚙️  CONFIGURACIONES OPCIONALES para '$dataset_choice':"
+                
+                if confirm "¿Configurar compresión? (recomendado)"; then
+                    echo "Tipos de compresión:"
+                    echo "1. lz4 - Rápida, buen balance (recomendado)"
+                    echo "2. gzip - Alta compresión, más lenta"
+                    echo "3. off - Sin compresión"
+                    
+                    read -p "Selecciona (1-3) [1]: " compression_choice
+                    compression_choice=${compression_choice:-1}
+                    
+                    case $compression_choice in
+                        1) sudo zfs set compression=lz4 "$pool_name/$dataset_choice";;
+                        2) sudo zfs set compression=gzip "$pool_name/$dataset_choice";;
+                        3) sudo zfs set compression=off "$pool_name/$dataset_choice";;
+                    esac
+                    show_message "  🗜️  Compresión configurada"
+                fi
+                
+                if confirm "¿Establecer cuota de espacio?"; then
+                    read -p "Cuota en GB (ej: 100): " quota_gb
+                    if [[ "$quota_gb" =~ ^[0-9]+$ ]] && [ "$quota_gb" -gt 0 ]; then
+                        sudo zfs set quota="${quota_gb}G" "$pool_name/$dataset_choice"
+                        show_message "  📏 Cuota establecida: ${quota_gb}GB"
+                    fi
+                fi
+                
+            else
+                show_error "❌ Error creando dataset '$pool_name/$dataset_choice'"
+            fi
+            
+        else
+            if [ -z "$dataset_choice" ]; then
+                show_error "❌ El nombre del dataset no puede estar vacío"
+            else
+                show_error "❌ Nombre inválido. Usa solo letras, números, guiones y guiones bajos"
+            fi
+        fi
+        
+        echo ""
+    done
+    
+    # Mostrar resumen de datasets creados en esta sesión
+    if [ ${#datasets_created[@]} -gt 0 ]; then
+        echo ""
+        show_message "📊 RESUMEN DE DATASETS CREADOS EN ESTA SESIÓN:"
+        for dataset in "${datasets_created[@]}"; do
+            local mountpoint=$(zfs get -H -o value mountpoint "$pool_name/$dataset" 2>/dev/null)
+            local compression=$(zfs get -H -o value compression "$pool_name/$dataset" 2>/dev/null)
+            local quota=$(zfs get -H -o value quota "$pool_name/$dataset" 2>/dev/null)
+            
+            echo "  ✅ $pool_name/$dataset"
+            echo "     📁 Montaje: $mountpoint"
+            echo "     🗜️  Compresión: $compression"
+            if [ "$quota" != "none" ]; then
+                echo "     📏 Cuota: $quota"
+            fi
+            echo ""
+        done
+    fi
+}
+
+# Función para verificar si un disco está en uso por RAID
+check_disk_raid_status() {
+    local disk="$1"
+    local raid_info=""
+    
+    # Verificar BTRFS - Mejorado para detectar arrays multi-disco
+    if command -v btrfs &> /dev/null; then
+        # Primero verificar si el disco tiene un filesystem BTRFS
+        if sudo btrfs filesystem show "/dev/$disk" 2>/dev/null | grep -q "uuid:"; then
+            local btrfs_uuid=$(sudo btrfs filesystem show "/dev/$disk" 2>/dev/null | grep "uuid:" | awk '{print $4}')
+            local btrfs_label=$(sudo btrfs filesystem show "/dev/$disk" 2>/dev/null | grep "Label:" | awk '{print $2}')
+            
+            # Obtener información detallada del array BTRFS
+            local btrfs_info=$(sudo btrfs filesystem show "/dev/$disk" 2>/dev/null)
+            local total_devices=$(echo "$btrfs_info" | grep "Total devices" | awk '{print $3}')
+            local device_list=$(echo "$btrfs_info" | grep "devid" | awk '{print $NF}' | sed 's|/dev/||' | tr '\n' ',' | sed 's/,$//')
+            
+            # Obtener el punto de montaje si existe
+            local mount_point=$(mount | grep "/dev/$disk" | awk '{print $3}' | head -1)
+            
+            # Intentar obtener el tipo de RAID si está montado
+            local raid_profile=""
+            if [ -n "$mount_point" ]; then
+                raid_profile=$(sudo btrfs filesystem usage "$mount_point" 2>/dev/null | grep "Data," | head -1 | awk '{print $1}' | cut -d',' -f2 | cut -d':' -f1)
+                if [ -z "$raid_profile" ]; then
+                    raid_profile="single"
+                fi
+            fi
+            
+            # Construir información del RAID
+            if [ "$total_devices" -gt 1 ]; then
+                if [ -n "$mount_point" ]; then
+                    raid_info="BTRFS RAID ($raid_profile, $total_devices discos: $device_list) - Montado en: $mount_point"
+                else
+                    raid_info="BTRFS RAID ($total_devices discos: $device_list)"
+                fi
+            else
+                if [ -n "$mount_point" ]; then
+                    raid_info="BTRFS (Single disk) - Montado en: $mount_point"
+                else
+                    raid_info="BTRFS (Single disk)"
+                fi
+            fi
+        fi
+    fi
+    
+    # Verificar ZFS - método corregido con sed
+    if command -v zpool &> /dev/null; then
+        # Obtener lista de todos los pools
+        local all_pools=$(zpool list -H -o name 2>/dev/null)
+        
+        for pool in $all_pools; do
+            if [ -n "$pool" ]; then
+                # Obtener dispositivos del pool usando sed (funciona mejor)
+                local pool_devices=$(zpool status "$pool" 2>/dev/null | sed -n '/^\s*sd[a-z]/p' | awk '{print $1}')
+                
+                # Verificar si el disco está en la lista
+                if echo "$pool_devices" | grep -q "^${disk}$"; then
+                    local pool_health=$(zpool list -H -o health "$pool" 2>/dev/null)
+                    local pool_size=$(zpool list -H -o size "$pool" 2>/dev/null)
+                    local pool_type=$(zpool status "$pool" 2>/dev/null | grep -o 'raidz[0-9]*-[0-9]*\|mirror-[0-9]*' | head -1)
+                    
+                    # Si no hay pool_type específico, es un stripe
+                    if [ -z "$pool_type" ]; then
+                        pool_type="stripe"
+                    fi
+                    
+                    raid_info="ZFS Pool: $pool ($pool_type, $pool_health, $pool_size)"
+                    break
+                fi
+                
+                # También verificar otros tipos de dispositivos (nvme, etc.)
+                if [ -z "$raid_info" ]; then
+                    local all_devices=$(zpool status "$pool" 2>/dev/null | sed -n '/^\s*[a-z]/p' | grep -v 'raidz\|mirror\|spare\|log\|cache\|replacing' | awk '{print $1}')
+                    if echo "$all_devices" | grep -q "^${disk}$"; then
+                        local pool_health=$(zpool list -H -o health "$pool" 2>/dev/null)
+                        local pool_size=$(zpool list -H -o size "$pool" 2>/dev/null)
+                        local pool_type=$(zpool status "$pool" 2>/dev/null | grep -o 'raidz[0-9]*-[0-9]*\|mirror-[0-9]*' | head -1)
+                        
+                        # Si no hay pool_type específico, es un stripe
+                        if [ -z "$pool_type" ]; then
+                            pool_type="stripe"
+                        fi
+                        
+                        raid_info="ZFS Pool: $pool ($pool_type, $pool_health, $pool_size)"
+                        break
+                    fi
+                fi
+                
+                # También verificar particiones (sdc1, sdc9, etc.)
+                local disk_partitions=$(lsblk -ln -o NAME "/dev/$disk" 2>/dev/null | grep -v "^${disk##*/}$")
+                for partition in $disk_partitions; do
+                    if echo "$pool_devices $all_devices" | grep -q "^${partition}$"; then
+                        local pool_health=$(zpool list -H -o health "$pool" 2>/dev/null)
+                        local pool_size=$(zpool list -H -o size "$pool" 2>/dev/null)
+                        local pool_type=$(zpool status "$pool" 2>/dev/null | grep -o 'raidz[0-9]*-[0-9]*\|mirror-[0-9]*' | head -1)
+                        
+                        # Si no hay pool_type específico, es un stripe
+                        if [ -z "$pool_type" ]; then
+                            pool_type="stripe"
+                        fi
+                        
+                        raid_info="ZFS Pool: $pool ($pool_type, $pool_health, $pool_size)"
+                        break 2
+                    fi
+                done
+            fi
+        done
+    fi
+    
+    # Verificar mdadm (Linux Software RAID)
+    if command -v mdadm &> /dev/null; then
+        local md_array=$(mdadm --examine "/dev/$disk" 2>/dev/null | grep "Array UUID" | awk '{print $4}')
+        if [ -n "$md_array" ]; then
+            local md_name=$(mdadm --examine "/dev/$disk" 2>/dev/null | grep "Name" | awk '{print $3}')
+            raid_info="mdadm RAID: $md_name (UUID: $md_array)"
+        fi
+    fi
+    
+    # Verificar LVM
+    if command -v pvdisplay &> /dev/null; then
+        if pvdisplay "/dev/$disk" 2>/dev/null | grep -q "PV Name"; then
+            local vg_name=$(pvdisplay "/dev/$disk" 2>/dev/null | grep "VG Name" | awk '{print $3}')
+            raid_info="LVM Physical Volume (VG: $vg_name)"
+        fi
+    fi
+    
+    # Verificar si tiene particiones montadas (que no sean ZFS)
+    if mount | grep -q "/dev/$disk" && [ -z "$(echo "$raid_info" | grep ZFS)" ]; then
+        local mount_points=$(mount | grep "/dev/$disk" | awk '{print $3}' | tr '\n' ' ')
+        if [ -n "$raid_info" ]; then
+            raid_info="$raid_info, Montado en: $mount_points"
+        else
+            raid_info="Montado en: $mount_points"
+        fi
+    fi
+    
+    echo "$raid_info"
+}
+
+# Función para eliminar pools ZFS específicos de forma segura
+destroy_zfs_pool_safely() {
+    local pool_name="$1"
+    local force="${2:-false}"
+    
+    if [ -z "$pool_name" ]; then
+        show_error "Nombre de pool ZFS no especificado"
+        return 1
+    fi
+    
+    # Verificar que el pool existe
+    if ! zpool list -H -o name 2>/dev/null | grep -q "^${pool_name}$"; then
+        show_warning "Pool ZFS '$pool_name' no encontrado"
+        return 0
+    fi
+    
+    show_warning "🗑️  Preparando eliminación del pool ZFS: '$pool_name'"
+    
+    # Mostrar información del pool antes de eliminar
+    local pool_size=$(zpool list -H -o size "$pool_name" 2>/dev/null)
+    local pool_health=$(zpool list -H -o health "$pool_name" 2>/dev/null)
+    local pool_devices=$(zpool status "$pool_name" 2>/dev/null | grep -E "^\s+[a-z]" | awk '{print $1}' | grep -v "raidz\|mirror\|spare\|log\|cache\|replacing")
+    
+    echo "   📊 Tamaño: $pool_size"
+    echo "   💚 Estado: $pool_health"
+    echo "   💿 Dispositivos: $(echo $pool_devices | tr '\n' ' ')"
+    
+    # Mostrar datasets que se eliminarán
+    local datasets=$(zfs list -H -o name -r "$pool_name" 2>/dev/null)
+    if [ -n "$datasets" ]; then
+        echo "   📁 Datasets que se eliminarán:"
+        for dataset in $datasets; do
+            local used=$(zfs list -H -o used "$dataset" 2>/dev/null)
+            echo "      • $dataset (Usado: $used)"
+        done
+    fi
+    
+    # Mostrar snapshots que se eliminarán
+    local snapshots=$(zfs list -t snapshot -H -o name -r "$pool_name" 2>/dev/null)
+    if [ -n "$snapshots" ]; then
+        echo "   📸 Snapshots que se eliminarán:"
+        for snapshot in $snapshots; do
+            echo "      • $snapshot"
+        done
+    fi
+    
+    echo ""
+    show_warning "⚠️  ESTA ACCIÓN ELIMINARÁ PERMANENTEMENTE:"
+    show_warning "    • El pool ZFS '$pool_name' completo"
+    show_warning "    • Todos los datasets y sus datos"
+    show_warning "    • Todos los snapshots"
+    show_warning "    • Configuración de montaje automático"
+    echo ""
+    
+    if [ "$force" != "true" ]; then
+        if ! confirm "¿Estás COMPLETAMENTE SEGURO de eliminar el pool '$pool_name'?"; then
+            show_message "Eliminación cancelada por el usuario"
+            return 1
+        fi
+    fi
+    
+    # Proceder con la eliminación
+    show_message "🔄 Eliminando pool ZFS '$pool_name'..."
+    
+    # 1. Desmontار todos los datasets
+    if [ -n "$datasets" ]; then
+        show_message "Desmontando datasets..."
+        for dataset in $datasets; do
+            sudo zfs unmount "$dataset" 2>/dev/null || true
+        done
+    fi
+    
+    # 2. Intentar exportar el pool primero
+    show_message "Exportando pool..."
+    sudo zpool export "$pool_name" 2>/dev/null || true
+    sleep 1
+    
+    # 3. Destruir el pool
+    show_message "Destruyendo pool..."
+    if sudo zpool destroy -f "$pool_name" 2>/dev/null; then
+        show_message "✅ Pool ZFS '$pool_name' eliminado exitosamente"
+    else
+        show_warning "⚠️  Intento estándar falló, forzando eliminación..."
+        
+        # Intentar importar y destruir forzadamente
+        sudo zpool import "$pool_name" 2>/dev/null || true
+        sleep 1
+        
+        if sudo zpool destroy -f "$pool_name" 2>/dev/null; then
+            show_message "✅ Pool ZFS '$pool_name' eliminado forzadamente"
+        else
+            show_error "❌ No se pudo eliminar el pool '$pool_name'"
+            return 1
+        fi
+    fi
+    
+    # 4. Limpiar referencias en servicios de sistema
+    show_message "Limpiando configuración del sistema..."
+    
+    # Limpiar cache de zpool
+    sudo rm -f /etc/zfs/zpool.cache 2>/dev/null || true
+    
+    # Regenerar cache
+    sudo zpool import -a 2>/dev/null || true
+    
+    return 0
+}
+
+# Función para eliminar filesystem BTRFS de forma segura
+destroy_btrfs_safely() {
+    local disk="$1"
+    local force="${2:-false}"
+    
+    if [ -z "$disk" ]; then
+        show_error "Disco no especificado para eliminación BTRFS"
+        return 1
+    fi
+    
+    # Verificar que es BTRFS
+    if ! btrfs filesystem show "/dev/$disk" 2>/dev/null | grep -q "uuid:"; then
+        show_warning "No se encontró filesystem BTRFS en /dev/$disk"
+        return 0
+    fi
+    
+    show_warning "🗑️  Preparando eliminación del filesystem BTRFS en: /dev/$disk"
+    
+    # Obtener información del filesystem
+    local btrfs_uuid=$(btrfs filesystem show "/dev/$disk" 2>/dev/null | grep "uuid:" | awk '{print $4}')
+    local btrfs_size=$(lsblk -dpno SIZE "/dev/$disk" | tr -d ' ')
+    local mount_point=$(mount | grep "/dev/$disk" | awk '{print $3}' | head -1)
+    
+    echo "   📊 Tamaño: $btrfs_size"
+    echo "   🆔 UUID: $btrfs_uuid"
+    if [ -n "$mount_point" ]; then
+        echo "   📁 Montado en: $mount_point"
+    fi
+    
+    # Mostrar subvolúmenes si existen
+    if [ -n "$mount_point" ]; then
+        local subvolumes=$(btrfs subvolume list "$mount_point" 2>/dev/null | awk '{print $9}')
+        if [ -n "$subvolumes" ]; then
+            echo "   📂 Subvolúmenes que se eliminarán:"
+            for subvol in $subvolumes; do
+                echo "      • $subvol"
+            done
+        fi
+    fi
+    
+    echo ""
+    show_warning "⚠️  ESTA ACCIÓN ELIMINARÁ PERMANENTEMENTE:"
+    show_warning "    • El filesystem BTRFS completo en /dev/$disk"
+    show_warning "    • Todos los datos y subvolúmenes"
+    show_warning "    • Entradas de montaje automático en /etc/fstab"
+    echo ""
+    
+    if [ "$force" != "true" ]; then
+        if ! confirm "¿Estás COMPLETAMENTE SEGURO de eliminar el BTRFS en /dev/$disk?"; then
+            show_message "Eliminación cancelada por el usuario"
+            return 1
+        fi
+    fi
+    
+    # Proceder con la eliminación
+    show_message "🔄 Eliminando filesystem BTRFS en /dev/$disk..."
+    
+    # 1. Desmontar el filesystem
+    if [ -n "$mount_point" ]; then
+        show_message "Desmontando $mount_point..."
+        sudo umount "$mount_point" 2>/dev/null || sudo umount -f "$mount_point" 2>/dev/null || true
+    fi
+    
+    # Desmontar cualquier partición del disco
+    sudo umount "/dev/$disk"* 2>/dev/null || true
+    
+    # 2. Eliminar entradas de /etc/fstab específicas de BTRFS de forma segura
+    show_message "Eliminando entradas BTRFS de /etc/fstab..."
+    if [ -n "$btrfs_uuid" ]; then
+        # Crear backup de fstab con timestamp
+        local backup_file="/etc/fstab.backup.$(date +%Y%m%d-%H%M%S)"
+        sudo cp /etc/fstab "$backup_file" 2>/dev/null || true
+        show_message "📋 Backup de fstab creado: $backup_file"
+        
+        # Verificar qué entradas existen antes de eliminar
+        local existing_entries=$(grep -E "UUID=$btrfs_uuid" /etc/fstab 2>/dev/null | grep -i btrfs || true)
+        if [ -n "$existing_entries" ]; then
+            show_message "📝 Entradas BTRFS encontradas en /etc/fstab:"
+            echo "$existing_entries" | while read -r entry; do
+                echo "   • $entry"
+            done
+            
+            # Eliminar entradas por UUID solo si el tipo de filesystem es btrfs
+            # Usar patrones más específicos para mayor seguridad
+            sudo sed -i "/^[[:space:]]*UUID=$btrfs_uuid[[:space:]].*[[:space:]]btrfs[[:space:]]/d" /etc/fstab 2>/dev/null || true
+            sudo sed -i "/^[[:space:]]*UUID=$btrfs_uuid[[:space:]].*[[:space:]]btrfs$/d" /etc/fstab 2>/dev/null || true
+            
+            # Verificar si las entradas fueron eliminadas
+            local remaining_entries=$(grep -E "UUID=$btrfs_uuid" /etc/fstab 2>/dev/null | grep -i btrfs || true)
+            if [ -z "$remaining_entries" ]; then
+                show_message "✅ Entradas BTRFS eliminadas exitosamente de /etc/fstab"
+            else
+                show_warning "⚠️  Algunas entradas BTRFS permanecen en /etc/fstab:"
+                echo "$remaining_entries" | while read -r entry; do
+                    echo "   • $entry"
+                done
+            fi
+        else
+            show_message "ℹ️  No se encontraron entradas BTRFS automount en /etc/fstab para UUID: $btrfs_uuid"
+        fi
+    fi
+    
+    # También verificar entradas por device path (menos común pero posible)
+    local device_entries=$(grep -E "/dev/$disk" /etc/fstab 2>/dev/null | grep -i btrfs || true)
+    if [ -n "$device_entries" ]; then
+        show_message "📝 Entradas por device path encontradas:"
+        echo "$device_entries" | while read -r entry; do
+            echo "   • $entry"
+        done
+        
+        # Eliminar por device path pero solo líneas que contengan btrfs
+        sudo sed -i "\|^[[:space:]]*/dev/$disk[[:space:]].*[[:space:]]btrfs[[:space:]]|d" /etc/fstab 2>/dev/null || true
+        sudo sed -i "\|^[[:space:]]*/dev/$disk[0-9]*[[:space:]].*[[:space:]]btrfs[[:space:]]|d" /etc/fstab 2>/dev/null || true
+        
+        # Verificar si fueron eliminadas
+        local remaining_device_entries=$(grep -E "/dev/$disk" /etc/fstab 2>/dev/null | grep -i btrfs || true)
+        if [ -z "$remaining_device_entries" ]; then
+            show_message "✅ Entradas por device path eliminadas exitosamente"
+        fi
+    fi
+    
+    # 3. Limpiar metadatos BTRFS
+    show_message "Limpiando metadatos BTRFS..."
+    sudo wipefs -af "/dev/$disk" 2>/dev/null || true
+    
+    show_message "✅ Filesystem BTRFS en /dev/$disk eliminado exitosamente"
+    return 0
+}
+
+# Función para eliminar array BTRFS completo de forma segura
+destroy_btrfs_array_safely() {
+    local primary_disk="$1"
+    local array_uuid="$2"
+    
+    if [ -z "$primary_disk" ] || [ -z "$array_uuid" ]; then
+        show_error "Parámetros incorrectos para eliminación de array BTRFS"
+        return 1
+    fi
+    
+    show_warning "🗑️  Eliminando array BTRFS completo (UUID: $array_uuid)"
+    
+    # Obtener información completa del array
+    local btrfs_info=$(sudo btrfs filesystem show "/dev/$primary_disk" 2>/dev/null)
+    local total_devices=$(echo "$btrfs_info" | grep "Total devices" | awk '{print $3}')
+    local all_devices=$(echo "$btrfs_info" | grep "devid" | awk '{print $NF}' | sed 's|/dev/||')
+    local mount_point=$(mount | grep "UUID=$array_uuid" | awk '{print $3}' | head -1)
+    
+    echo "   📊 Total de dispositivos: $total_devices"
+    echo "   📀 Dispositivos: $all_devices"
+    if [ -n "$mount_point" ]; then
+        echo "   📁 Montado en: $mount_point"
+    fi
+    
+    # Obtener tipo de RAID si está montado
+    local raid_profile=""
+    if [ -n "$mount_point" ]; then
+        raid_profile=$(sudo btrfs filesystem usage "$mount_point" 2>/dev/null | grep "Data," | head -1 | awk '{print $1}' | cut -d',' -f2 | cut -d':' -f1)
+        if [ -n "$raid_profile" ]; then
+            echo "   🔧 Configuración RAID: $raid_profile"
+        fi
+    fi
+    
+    echo ""
+    show_warning "⚠️  ESTA ACCIÓN ELIMINARÁ PERMANENTEMENTE:"
+    show_warning "    • Todo el array BTRFS ($total_devices dispositivos)"
+    show_warning "    • Todos los datos y subvolúmenes"
+    show_warning "    • Entradas de montaje automático en /etc/fstab"
+    echo ""
+    
+    if ! confirm "¿Estás COMPLETAMENTE SEGURO de eliminar este array BTRFS completo?"; then
+        show_message "Eliminación cancelada por el usuario"
+        return 1
+    fi
+    
+    # Proceder con la eliminación del array completo
+    show_message "🔄 Eliminando array BTRFS..."
+    
+    # 1. Desmontar el filesystem
+    if [ -n "$mount_point" ]; then
+        show_message "Desmontando $mount_point..."
+        sudo umount "$mount_point" 2>/dev/null || sudo umount -f "$mount_point" 2>/dev/null || true
+    fi
+    
+    # Desmontar todos los dispositivos del array
+    for device in $all_devices; do
+        sudo umount "/dev/$device"* 2>/dev/null || true
+    done
+    
+    # 2. Eliminar entradas de /etc/fstab para el array completo
+    show_message "Eliminando entradas del array BTRFS de /etc/fstab..."
+    local backup_file="/etc/fstab.backup.$(date +%Y%m%d-%H%M%S)"
+    sudo cp /etc/fstab "$backup_file" 2>/dev/null || true
+    show_message "📋 Backup de fstab creado: $backup_file"
+    
+    # Verificar entradas existentes
+    local existing_entries=$(grep -E "UUID=$array_uuid" /etc/fstab 2>/dev/null | grep -i btrfs || true)
+    if [ -n "$existing_entries" ]; then
+        show_message "📝 Eliminando entradas del array BTRFS:"
+        echo "$existing_entries" | while read -r entry; do
+            echo "   • $entry"
+        done
+        
+        # Eliminar entradas por UUID del array
+        sudo sed -i "/^[[:space:]]*UUID=$array_uuid[[:space:]].*[[:space:]]btrfs[[:space:]]/d" /etc/fstab 2>/dev/null || true
+        sudo sed -i "/^[[:space:]]*UUID=$array_uuid[[:space:]].*[[:space:]]btrfs$/d" /etc/fstab 2>/dev/null || true
+        
+        # Verificar eliminación
+        local remaining_entries=$(grep -E "UUID=$array_uuid" /etc/fstab 2>/dev/null | grep -i btrfs || true)
+        if [ -z "$remaining_entries" ]; then
+            show_message "✅ Entradas del array eliminadas exitosamente de /etc/fstab"
+        else
+            show_warning "⚠️  Algunas entradas del array permanecen en /etc/fstab"
+        fi
+    else
+        show_message "ℹ️  No se encontraron entradas automount para este array"
+    fi
+    
+    # 3. Limpiar metadatos BTRFS de todos los dispositivos
+    show_message "Limpiando metadatos BTRFS de todos los dispositivos..."
+    for device in $all_devices; do
+        show_message "  Limpiando /dev/$device..."
+        sudo wipefs -af "/dev/$device" 2>/dev/null || true
+    done
+    
+    show_message "✅ Array BTRFS completo eliminado exitosamente"
+    show_message "   📀 Dispositivos limpiados: $all_devices"
+    return 0
+}
+
+# Función para limpiar disco de configuraciones RAID anteriores
+clean_disk() {
+    local disk="$1"
+    
+    show_message "Limpiando disco /dev/$disk..."
+    
+    # Desmontar si está montado
+    if mount | grep -q "/dev/$disk"; then
+        show_message "Desmontando /dev/$disk..."
+        sudo umount "/dev/$disk"* 2>/dev/null || true
+    fi
+    
+    # Verificar y destruir pools ZFS que usen este disco
+    if command -v zpool &> /dev/null; then
+        show_message "Verificando pools ZFS que usan /dev/$disk..."
+        
+        # Obtener lista de todos los pools
+        local all_pools=$(zpool list -H -o name 2>/dev/null)
+        local pools_to_destroy=()
+        
+        for pool in $all_pools; do
+            if [ -n "$pool" ]; then
+                # Verificar si este disco está en el pool
+                if zpool status "$pool" 2>/dev/null | sed -n '/^\s*sd[a-z]/p' | awk '{print $1}' | grep -q "^${disk}$"; then
+                    pools_to_destroy+=("$pool")
+                elif zpool status "$pool" 2>/dev/null | sed -n '/^\s*[a-z]/p' | grep -v 'raidz\|mirror\|spare\|log\|cache\|replacing' | awk '{print $1}' | grep -q "^${disk}$"; then
+                    pools_to_destroy+=("$pool")
+                fi
+                
+                # También verificar particiones
+                local disk_partitions=$(lsblk -ln -o NAME "/dev/$disk" 2>/dev/null | grep -v "^${disk##*/}$")
+                for partition in $disk_partitions; do
+                    if zpool status "$pool" 2>/dev/null | grep -q "$partition"; then
+                        pools_to_destroy+=("$pool")
+                        break
+                    fi
+                done
+            fi
+        done
+        
+        # Eliminar duplicados de pools
+        local unique_pools=($(printf "%s\n" "${pools_to_destroy[@]}" | sort -u))
+        
+        # Destruir pools encontrados usando la función segura
+        for pool in "${unique_pools[@]}"; do
+            if [ -n "$pool" ]; then
+                show_warning "🗑️  Detectado pool ZFS '$pool' usando el disco /dev/$disk"
+                
+                # Usar la función de eliminación segura
+                if ! destroy_zfs_pool_safely "$pool" "true"; then
+                    show_error "❌ Error eliminando el pool '$pool'"
+                    show_message "Continuando con limpieza manual..."
+                    
+                    # Fallback a método anterior si la función segura falla
+                    show_warning "⚠️  Intentando método de emergencia..."
+                    sudo zpool export "$pool" 2>/dev/null || true
+                    sleep 1
+                    sudo zpool destroy -f "$pool" 2>/dev/null || true
+                fi
+            fi
+        done
+        
+        # Limpiar etiquetas ZFS residuales en el disco y particiones
+        sudo zpool labelclear -f "/dev/$disk" 2>/dev/null || true
+        
+        # Limpiar particiones ZFS si existen
+        local disk_partitions=$(lsblk -ln -o NAME "/dev/$disk" 2>/dev/null | grep -v "^${disk##*/}$")
+        for partition in $disk_partitions; do
+            local full_partition="/dev/${partition}"
+            sudo zpool labelclear -f "$full_partition" 2>/dev/null || true
+        done
+    fi
+    
+    # Verificar y limpiar BTRFS usando la función segura
+    if command -v btrfs &> /dev/null; then
+        if btrfs filesystem show "/dev/$disk" 2>/dev/null | grep -q "uuid:"; then
+            show_warning "🗑️  Detectado filesystem BTRFS en /dev/$disk"
+            
+            # Usar la función de eliminación segura para BTRFS
+            if ! destroy_btrfs_safely "$disk" "true"; then
+                show_error "❌ Error eliminando filesystem BTRFS"
+                show_message "Continuando con limpieza manual..."
+                
+                # Fallback a limpieza básica
+                sudo wipefs -a "/dev/$disk" 2>/dev/null || true
+            fi
+        fi
+    fi
+    
+    # Limpiar metadatos mdadm
+    if command -v mdadm &> /dev/null; then
+        sudo mdadm --zero-superblock "/dev/$disk" 2>/dev/null || true
+    fi
+    
+    # Limpiar metadatos LVM
+    if command -v pvremove &> /dev/null; then
+        sudo pvremove -ff "/dev/$disk" 2>/dev/null || true
+    fi
+    
+    # Limpiar tabla de particiones y metadatos completamente
+    show_message "🧹 Limpiando tabla de particiones y metadatos de /dev/$disk..."
+    
+    # Limpiar los primeros 100MB y los últimos 100MB del disco
+    sudo dd if=/dev/zero of="/dev/$disk" bs=1M count=100 2>/dev/null || true
+    
+    # Obtener el tamaño del disco y limpiar el final también
+    local disk_size=$(lsblk -dpno SIZE "/dev/$disk" --bytes 2>/dev/null || echo "0")
+    if [ "$disk_size" -gt 104857600 ]; then  # Si es mayor a 100MB
+        local seek_pos=$(( (disk_size / 1048576) - 100 ))  # 100MB antes del final
+        sudo dd if=/dev/zero of="/dev/$disk" bs=1M seek="$seek_pos" count=100 2>/dev/null || true
+    fi
+    
+    # Limpiar con wipefs para asegurar que no queden metadatos
+    sudo wipefs -af "/dev/$disk" 2>/dev/null || true
+    
+    # Forzar actualización de la tabla de particiones
+    sudo partprobe "/dev/$disk" 2>/dev/null || true
+    sudo udevadm settle 2>/dev/null || true
+    
+    # Esperar un poco más para que el sistema reconozca los cambios
+    sleep 3
+    
+    show_message "✅ Disco /dev/$disk limpiado completamente"
+}
+
+# Función para detectar discos disponibles
+detect_disks() {
+    show_title "Detectando discos disponibles"
+    
+    # Obtener lista de discos, excluyendo dispositivos del sistema
+    AVAILABLE_DISKS=()
+    DISK_RAID_STATUS=()
+    
+    # Obtener disco raíz
+    ROOT_DISK=$(lsblk -no PKNAME $(findmnt -n -o SOURCE /))
+    
+    # Obtener discos con particiones montadas en puntos críticos del sistema
+    SYSTEM_DISKS=()
+    SYSTEM_DISKS+=("$ROOT_DISK")
+    
+    # Detectar discos que contienen particiones del sistema
+    while IFS= read -r device mount_point; do        
+        # Excluir puntos de montaje críticos del sistema
+        if [[ "$mount_point" == "/" ]] || [[ "$mount_point" == "/boot"* ]] || \
+           [[ "$mount_point" == "/usr"* ]] || [[ "$mount_point" == "/var"* ]] || \
+           [[ "$mount_point" == "/etc"* ]] || [[ "$mount_point" == "/lib"* ]] || \
+           [[ "$mount_point" == "/bin"* ]] || [[ "$mount_point" == "/sbin"* ]]; then
+            
+            # Extraer el disco base del device
+            local base_disk=$(lsblk -no PKNAME "$device" 2>/dev/null || echo "$device" | sed 's|/dev/||' | sed 's/[0-9]*$//')
+            if [ -n "$base_disk" ] && [[ ! " ${SYSTEM_DISKS[*]} " =~ " ${base_disk} " ]]; then
+                SYSTEM_DISKS+=("$base_disk")
+            fi
+        fi
+    done < <(findmnt -rn -o SOURCE,TARGET | grep -E "^/dev/")
+    
+    show_message "📋 Discos del sistema excluidos: ${SYSTEM_DISKS[*]}"
+    
+    while IFS= read -r disk; do
+        # Excluir discos del sistema, dispositivos loop, y particiones
+        if [[ ! " ${SYSTEM_DISKS[*]} " =~ " ${disk} " ]] && \
+           [[ "$disk" != loop* ]] && [[ "$disk" != ram* ]] && \
+           [[ "$disk" != *boot* ]] && [[ ! "$disk" =~ [0-9]$ ]]; then
+            
+            # Verificar que sea un disco completo, no una partición
+            if lsblk -dpno TYPE "/dev/$disk" 2>/dev/null | grep -q "disk"; then
+                AVAILABLE_DISKS+=("$disk")
+                # Verificar estado RAID del disco
+                raid_status=$(check_disk_raid_status "$disk")
+                DISK_RAID_STATUS+=("$raid_status")
+            fi
+        fi
+    done < <(lsblk -dpno NAME | sed 's|/dev/||' | grep -v '^$')
+    
+    if [ ${#AVAILABLE_DISKS[@]} -eq 0 ]; then
+        show_error "No se encontraron discos disponibles para RAID"
+        exit 1
+    fi
+    
+    show_message "Discos encontrados:"
+    local disks_with_raid=false
+    
+    for i in "${!AVAILABLE_DISKS[@]}"; do
+        disk="/dev/${AVAILABLE_DISKS[$i]}"
+        size=$(lsblk -dpno SIZE "$disk" | tr -d ' ')
+        model=$(lsblk -dpno MODEL "$disk" | tr -d ' ')
+        status="${DISK_RAID_STATUS[$i]}"
+        
+        if [ -n "$status" ]; then
+            echo -e "  $((i+1)). ${AVAILABLE_DISKS[$i]} - $size - $model ${RED}[EN USO: $status]${NC}"
+            disks_with_raid=true
+        else
+            echo "  $((i+1)). ${AVAILABLE_DISKS[$i]} - $size - $model [LIBRE]"
+        fi
+    done
+    
+    # Si hay discos en RAID existentes, preguntar al usuario
+    if [ "$disks_with_raid" = true ]; then
+        show_warning "¡ATENCIÓN! Algunos discos están siendo utilizados en configuraciones RAID existentes."
+        show_warning "Si continúas, tendrás la opción de limpiar estos discos antes de crear el nuevo RAID."
+        show_warning "Esto DESTRUIRÁ todos los datos en esos discos."
+        
+        if ! confirm "¿Deseas continuar con la configuración?"; then
+            show_message "Configuración cancelada por el usuario"
+            exit 0
+        fi
+    fi
+    
+    # Detectar NVME
+    NVME_DISK=""
+    for disk in "${AVAILABLE_DISKS[@]}"; do
+        if [[ "$disk" == nvme* ]]; then
+            NVME_DISK="$disk"
+            show_message "Detectado disco NVME: $NVME_DISK"
+            break
+        fi
+    done
+}
+
+# Función para seleccionar tipo de filesystem
+select_filesystem() {
+    show_title "Selección de Sistema de Archivos"
+    echo "Selecciona el tipo de sistema de archivos RAID:"
+    echo "1. BTRFS"
+    echo "2. ZFS"
+    
+    while true; do
+        read -p "Selecciona una opción (1-2): " choice
+        case $choice in
+            1)
+                FILESYSTEM_TYPE="btrfs"
+                show_warning "NOTA: En BTRFS, RAID 5/6 aún es experimental"
+                break
+                ;;
+            2)
+                FILESYSTEM_TYPE="zfs"
+                break
+                ;;
+            *)
+                echo "Opción inválida. Por favor selecciona 1 o 2."
+                ;;
+        esac
+    done
+}
+
+# Función para mostrar tipos de RAID
+show_raid_types() {
+    if [ "$FILESYSTEM_TYPE" = "btrfs" ]; then
+        echo "Tipos de RAID disponibles en BTRFS:"
+        echo "1. RAID 0 (stripe) - No redundancy, maximum performance and capacity"
+        echo "2. RAID 1 (mirror) - Data mirrored across drives, 50% capacity"
+        echo "3. RAID 5 - Single drive fault tolerance with parity (EXPERIMENTAL)"
+        echo "4. RAID 6 - Dual drive fault tolerance with parity (EXPERIMENTAL)"
+        echo "5. RAID 10 - Combination of RAID 0 and 1, requires 4+ drives"
+    else
+        echo "Tipos de RAID disponibles en ZFS:"
+        echo "1. Stripe - No redundancy, maximum performance"
+        echo "2. Mirror - Data mirrored across drives"
+        echo "3. RAIDZ1 - Single parity, equivalent to RAID 5"
+        echo "4. RAIDZ2 - Double parity, equivalent to RAID 6"
+        echo "5. RAIDZ3 - Triple parity, requires 4+ drives"
+    fi
+}
+
+# Función para calcular capacidad del RAID
+calculate_raid_capacity() {
+    local raid_type="$1"
+    local disk_sizes=("${@:2}")
+    local total_capacity=0
+    local min_size=${disk_sizes[0]}
+    local num_disks=${#disk_sizes[@]}
+    
+    # Encontrar el disco más pequeño
+    for size in "${disk_sizes[@]}"; do
+        if [ "$size" -lt "$min_size" ]; then
+            min_size=$size
+        fi
+        total_capacity=$((total_capacity + size))
+    done
+    
+    # Calcular capacidad según tipo de RAID
+    case $raid_type in
+        "raid0"|"stripe")
+            RAID_CAPACITY=$total_capacity
+            ;;
+        "raid1"|"mirror")
+            RAID_CAPACITY=$min_size
+            ;;
+        "raid5"|"raidz1")
+            RAID_CAPACITY=$(( min_size * (num_disks - 1) ))
+            ;;
+        "raid6"|"raidz2")
+            RAID_CAPACITY=$(( min_size * (num_disks - 2) ))
+            ;;
+        "raid10")
+            RAID_CAPACITY=$(( min_size * (num_disks / 2) ))
+            ;;
+        "raidz3")
+            RAID_CAPACITY=$(( min_size * (num_disks - 3) ))
+            ;;
+    esac
+    
+    # Mostrar información si hay discos de diferente tamaño
+    local sizes_differ=false
+    for size in "${disk_sizes[@]}"; do
+        if [ "$size" -ne "${disk_sizes[0]}" ]; then
+            sizes_differ=true
+            break
+        fi
+    done
+    
+    if [ "$sizes_differ" = true ]; then
+        show_warning "¡ATENCIÓN! Los discos tienen diferentes tamaños:"
+        for i in "${!SELECTED_DISKS[@]}"; do
+            echo "  ${SELECTED_DISKS[$i]}: $(( ${disk_sizes[$i]} / 1024 / 1024 / 1024 )) GB"
+        done
+        echo "Capacidad del RAID resultante: $(( RAID_CAPACITY / 1024 / 1024 / 1024 )) GB"
+        echo "Se utilizará el tamaño del disco más pequeño como referencia."
+        
+        if ! confirm "¿Deseas continuar con esta configuración?"; then
+            show_message "Configuración cancelada por el usuario"
+            exit 0
+        fi
+    fi
+}
+
+# Función para seleccionar discos
+select_disks() {
+    show_title "Selección de Discos"
+    
+    local min_disks=2
+    case $RAID_TYPE in
+        "raid5"|"raidz1") min_disks=3;;
+        "raid6"|"raidz2") min_disks=4;;
+        "raid10") min_disks=4;;
+        "raidz3") min_disks=4;;
+    esac
+    
+    show_message "Selecciona los discos para el RAID (mínimo $min_disks discos):"
+    echo ""
+    echo "📖 INSTRUCCIONES DE SELECCIÓN:"
+    echo "   Selección individual: Escribe el número del disco (ej: 3)"
+    echo "   Selección múltiple:   Escribe números separados por espacios (ej: 3 4 5 6)"
+    echo "   Selección por rango:  Escribe rango con guión (ej: 3-6)"
+    echo "   Quitar selección:     Vuelve a escribir el número del disco"
+    echo ""
+    echo "🎯 COMANDOS ESPECIALES:"
+    echo "   'all'   - Seleccionar todos los discos libres"
+    echo "   'zfs'   - Seleccionar todos los discos ZFS (requiere confirmación)"
+    echo "   'clear' - Limpiar toda la selección"
+    echo "   'done'  - Finalizar selección y continuar"
+    echo ""
+    
+    SELECTED_DISKS=()
+    SELECTED_DISK_SIZES=()
+    DISKS_TO_CLEAN=()
+    
+    while true; do
+        echo "Discos disponibles:"
+        for i in "${!AVAILABLE_DISKS[@]}"; do
+            disk="/dev/${AVAILABLE_DISKS[$i]}"
+            size=$(lsblk -dpno SIZE "$disk" | tr -d ' ')
+            status="${DISK_RAID_STATUS[$i]}"
+            
+            if [ -n "$status" ]; then
+                echo -e "  $((i+1)). ${AVAILABLE_DISKS[$i]} - $size ${RED}[EN USO: $status]${NC}"
+            else
+                echo "  $((i+1)). ${AVAILABLE_DISKS[$i]} - $size [LIBRE]"
+            fi
+        done
+        
+        echo ""
+        if [ ${#SELECTED_DISKS[@]} -gt 0 ]; then
+            echo "✅ Discos seleccionados (${#SELECTED_DISKS[@]}/${#AVAILABLE_DISKS[@]}): ${SELECTED_DISKS[*]}"
+        else
+            echo "⭕ Discos seleccionados: ninguno"
+        fi
+        echo ""
+        echo "💡 EJEMPLOS DE USO:"
+        if [ ${#SELECTED_DISKS[@]} -eq 0 ]; then
+            if [ "$FILESYSTEM_TYPE" = "zfs" ]; then
+                echo "   Para RAID ZFS:  escribe 'zfs' o '3 4 5 6'"
+            else
+                echo "   Para RAID BTRFS: escribe 'btrfs' o '3 4 5 6'"
+            fi
+            echo "   Para algunos:   escribe '3 4' o '3-4'"
+            echo "   Individual:     escribe '3' luego '4', etc."
+        else
+            echo "   Agregar más:    escribe '${#SELECTED_DISKS[@]}+1' o números adicionales"
+            echo "   Quitar uno:     escribe el número de un disco ya seleccionado"
+            echo "   Terminar:       escribe 'done' (necesitas ${min_disks} mínimo)"
+        fi
+        echo ""
+        
+        read -p "👉 Selección: " choice
+        
+        if [ "$choice" = "done" ]; then
+            if [ ${#SELECTED_DISKS[@]} -ge $min_disks ]; then
+                break
+            else
+                show_error "❌ Necesitas al menos $min_disks discos para este RAID"
+            fi
+        elif [ "$choice" = "clear" ]; then
+            SELECTED_DISKS=()
+            SELECTED_DISK_SIZES=()
+            DISKS_TO_CLEAN=()
+            show_message "🧹 Selección limpiada"
+        elif [ "$choice" = "all" ]; then
+            # Seleccionar todos los discos libres
+            for i in "${!AVAILABLE_DISKS[@]}"; do
+                if [ -z "${DISK_RAID_STATUS[$i]}" ]; then
+                    disk="${AVAILABLE_DISKS[$i]}"
+                    if [[ ! " ${SELECTED_DISKS[*]} " =~ " ${disk} " ]]; then
+                        SELECTED_DISKS+=("$disk")
+                        disk_size=$(lsblk -dpno SIZE "/dev/$disk" --bytes)
+                        SELECTED_DISK_SIZES+=("$disk_size")
+                    fi
+                fi
+            done
+            show_message "✅ Se seleccionaron todos los discos libres"
+        elif [ "$choice" = "zfs" ]; then
+            # Seleccionar todos los discos ZFS con confirmación
+            local zfs_disks=()
+            for i in "${!AVAILABLE_DISKS[@]}"; do
+                if [[ "${DISK_RAID_STATUS[$i]}" == *"ZFS"* ]]; then
+                    zfs_disks+=("${AVAILABLE_DISKS[$i]}")
+                fi
+            done
+            
+            if [ ${#zfs_disks[@]} -gt 0 ]; then
+                show_warning "⚠️  Esto seleccionará todos los discos ZFS: ${zfs_disks[*]}"
+                show_warning "⚠️  Estos discos serán COMPLETAMENTE BORRADOS"
+                if confirm "¿Deseas seleccionar todos los discos ZFS?"; then
+                    for disk in "${zfs_disks[@]}"; do
+                        if [[ ! " ${SELECTED_DISKS[*]} " =~ " ${disk} " ]]; then
+                            SELECTED_DISKS+=("$disk")
+                            disk_size=$(lsblk -dpno SIZE "/dev/$disk" --bytes)
+                            SELECTED_DISK_SIZES+=("$disk_size")
+                            DISKS_TO_CLEAN+=("$disk")
+                        fi
+                    done
+                    show_message "✅ Se seleccionaron todos los discos ZFS"
+                fi
+            else
+                show_warning "❌ No hay discos ZFS disponibles"
+            fi
+        elif [ "$choice" = "btrfs" ]; then
+            # Seleccionar todos los discos BTRFS con confirmación
+            local btrfs_disks=()
+            for i in "${!AVAILABLE_DISKS[@]}"; do
+                if [[ "${DISK_RAID_STATUS[$i]}" == *"BTRFS"* ]]; then
+                    btrfs_disks+=("${AVAILABLE_DISKS[$i]}")
+                fi
+            done
+            
+            if [ ${#btrfs_disks[@]} -gt 0 ]; then
+                show_warning "⚠️  Esto seleccionará todos los discos BTRFS: ${btrfs_disks[*]}"
+                show_warning "⚠️  Estos discos serán COMPLETAMENTE BORRADOS"
+                if confirm "¿Deseas seleccionar todos los discos BTRFS?"; then
+                    for disk in "${btrfs_disks[@]}"; do
+                        if [[ ! " ${SELECTED_DISKS[*]} " =~ " ${disk} " ]]; then
+                            SELECTED_DISKS+=("$disk")
+                            disk_size=$(lsblk -dpno SIZE "/dev/$disk" --bytes)
+                            SELECTED_DISK_SIZES+=("$disk_size")
+                            DISKS_TO_CLEAN+=("$disk")
+                        fi
+                    done
+                    show_message "✅ Se seleccionaron todos los discos BTRFS"
+                fi
+            else
+                show_warning "❌ No hay discos BTRFS disponibles"
+            fi
+        elif [[ "$choice" =~ ^[0-9]+(-[0-9]+)?$ ]]; then
+            # Manejar rangos (ej: 3-6)
+            if [[ "$choice" =~ - ]]; then
+                local start=$(echo "$choice" | cut -d'-' -f1)
+                local end=$(echo "$choice" | cut -d'-' -f2)
+                
+                if [ "$start" -ge 1 ] && [ "$end" -le ${#AVAILABLE_DISKS[@]} ] && [ "$start" -le "$end" ]; then
+                    for ((i=start; i<=end; i++)); do
+                        local disk_index=$((i-1))
+                        local disk="${AVAILABLE_DISKS[$disk_index]}"
+                        local disk_status="${DISK_RAID_STATUS[$disk_index]}"
+                        
+                        # Procesar disco (similar a la lógica individual)
+                        if [[ ! " ${SELECTED_DISKS[*]} " =~ " ${disk} " ]]; then
+                            if [ -n "$disk_status" ]; then
+                                show_warning "⚠️  Disco $disk está en uso: $disk_status"
+                                if confirm "¿Limpiar $disk y agregarlo?"; then
+                                    SELECTED_DISKS+=("$disk")
+                                    disk_size=$(lsblk -dpno SIZE "/dev/$disk" --bytes)
+                                    SELECTED_DISK_SIZES+=("$disk_size")
+                                    DISKS_TO_CLEAN+=("$disk")
+                                fi
+                            else
+                                SELECTED_DISKS+=("$disk")
+                                disk_size=$(lsblk -dpno SIZE "/dev/$disk" --bytes)
+                                SELECTED_DISK_SIZES+=("$disk_size")
+                            fi
+                        fi
+                    done
+                    show_message "✅ Procesado rango $start-$end"
+                else
+                    echo "❌ Rango inválido. Usa formato: inicio-fin (ej: 3-6)"
+                fi
+            else
+                # Selección individual (lógica original)
+                if [ "$choice" -ge 1 ] && [ "$choice" -le ${#AVAILABLE_DISKS[@]} ]; then
+                    disk_index=$((choice-1))
+                    disk="${AVAILABLE_DISKS[$disk_index]}"
+                    disk_status="${DISK_RAID_STATUS[$disk_index]}"
+                    
+                    # Verificar si ya está seleccionado
+                    if [[ " ${SELECTED_DISKS[*]} " =~ " ${disk} " ]]; then
+                        # Quitar de la selección
+                        new_selected=()
+                        new_sizes=()
+                        new_to_clean=()
+                        for i in "${!SELECTED_DISKS[@]}"; do
+                            if [ "${SELECTED_DISKS[$i]}" != "$disk" ]; then
+                                new_selected+=("${SELECTED_DISKS[$i]}")
+                                new_sizes+=("${SELECTED_DISK_SIZES[$i]}")
+                            fi
+                        done
+                        SELECTED_DISKS=("${new_selected[@]}")
+                        SELECTED_DISK_SIZES=("${new_sizes[@]}")
+                        # Remover de discos a limpiar si estaba ahí
+                        for i in "${!DISKS_TO_CLEAN[@]}"; do
+                            if [ "${DISKS_TO_CLEAN[$i]}" != "$disk" ]; then
+                                new_to_clean+=("${DISKS_TO_CLEAN[$i]}")
+                            fi
+                        done
+                        DISKS_TO_CLEAN=("${new_to_clean[@]}")
+                        show_message "➖ Removido: $disk"
+                    else
+                        # Verificar si el disco está en uso
+                        if [ -n "$disk_status" ]; then
+                            show_warning "⚠️  El disco $disk está en uso: $disk_status"
+                            show_warning "⚠️  Si continúas, este disco será completamente limpiado y se perderán TODOS los datos."
+                            
+                            if confirm "¿Deseas limpiar este disco y usarlo para el nuevo RAID?"; then
+                                SELECTED_DISKS+=("$disk")
+                                disk_size=$(lsblk -dpno SIZE "/dev/$disk" --bytes)
+                                SELECTED_DISK_SIZES+=("$disk_size")
+                                DISKS_TO_CLEAN+=("$disk")
+                                show_message "✅ Agregado (se limpiará): $disk"
+                            else
+                                show_message "❌ Disco $disk no seleccionado"
+                            fi
+                        else
+                            # Agregar a la selección (disco libre)
+                            SELECTED_DISKS+=("$disk")
+                            disk_size=$(lsblk -dpno SIZE "/dev/$disk" --bytes)
+                            SELECTED_DISK_SIZES+=("$disk_size")
+                            show_message "✅ Agregado: $disk"
+                        fi
+                    fi
+                else
+                    echo "❌ Número inválido. Usa 1-${#AVAILABLE_DISKS[@]}"
+                fi
+            fi
+        elif [[ "$choice" =~ ^[0-9\ ]+$ ]]; then
+            # Manejar múltiples números separados por espacios (ej: 3 4 5 6)
+            for num in $choice; do
+                if [ "$num" -ge 1 ] && [ "$num" -le ${#AVAILABLE_DISKS[@]} ]; then
+                    disk_index=$((num-1))
+                    disk="${AVAILABLE_DISKS[$disk_index]}"
+                    disk_status="${DISK_RAID_STATUS[$disk_index]}"
+                    
+                    if [[ ! " ${SELECTED_DISKS[*]} " =~ " ${disk} " ]]; then
+                        if [ -n "$disk_status" ]; then
+                            show_warning "⚠️  Disco $disk está en uso: $disk_status"
+                            if confirm "¿Limpiar $disk y agregarlo?"; then
+                                SELECTED_DISKS+=("$disk")
+                                disk_size=$(lsblk -dpno SIZE "/dev/$disk" --bytes)
+                                SELECTED_DISK_SIZES+=("$disk_size")
+                                DISKS_TO_CLEAN+=("$disk")
+                                show_message "✅ Agregado (se limpiará): $disk"
+                            fi
+                        else
+                            SELECTED_DISKS+=("$disk")
+                            disk_size=$(lsblk -dpno SIZE "/dev/$disk" --bytes)
+                            SELECTED_DISK_SIZES+=("$disk_size")
+                            show_message "✅ Agregado: $disk"
+                        fi
+                    else
+                        show_message "ℹ️  $disk ya estaba seleccionado"
+                    fi
+                else
+                    echo "❌ Número inválido: $num (usa 1-${#AVAILABLE_DISKS[@]})"
+                fi
+            done
+        else
+            echo "Opción inválida"
+        fi
+    done
+    
+    # Si hay discos para limpiar, mostrar resumen y confirmar
+    if [ ${#DISKS_TO_CLEAN[@]} -gt 0 ]; then
+        show_warning "RESUMEN DE DISCOS A LIMPIAR:"
+        for disk in "${DISKS_TO_CLEAN[@]}"; do
+            # Encontrar el índice del disco para mostrar su estado
+            for i in "${!AVAILABLE_DISKS[@]}"; do
+                if [ "${AVAILABLE_DISKS[$i]}" = "$disk" ]; then
+                    echo -e "  - $disk: ${DISK_RAID_STATUS[$i]}"
+                    break
+                fi
+            done
+        done
+        
+        show_warning "¡TODOS LOS DATOS EN ESTOS DISCOS SE PERDERÁN PERMANENTEMENTE!"
+        
+        if ! confirm "¿Estás completamente seguro de que deseas continuar?"; then
+            show_message "Operación cancelada por el usuario"
+            exit 0
+        fi
+        
+        # Proceder con la limpieza
+        for disk in "${DISKS_TO_CLEAN[@]}"; do
+            clean_disk "$disk"
+        done
+        
+        show_message "Todos los discos han sido limpiados exitosamente"
+    fi
+    
+    # Calcular capacidad del RAID
+    calculate_raid_capacity "$RAID_TYPE" "${SELECTED_DISK_SIZES[@]}"
+}
+
+# Función para configurar BTRFS
+setup_btrfs() {
+    show_title "Configurando BTRFS RAID"
+    
+    # Seleccionar tipo de RAID
+    show_raid_types
+    while true; do
+        read -p "Selecciona el tipo de RAID (1-5): " choice
+        case $choice in
+            1) RAID_TYPE="raid0"; break;;
+            2) RAID_TYPE="raid1"; break;;
+            3) RAID_TYPE="raid5"; 
+               show_warning "RAID 5 es experimental en BTRFS"
+               if confirm "¿Deseas continuar?"; then break; else continue; fi;;
+            4) RAID_TYPE="raid6";
+               show_warning "RAID 6 es experimental en BTRFS"
+               if confirm "¿Deseas continuar?"; then break; else continue; fi;;
+            5) RAID_TYPE="raid10"; break;;
+            *) echo "Opción inválida";;
+        esac
+    done
+    
+    select_disks
+    
+    # Solicitar punto de montaje
+    read -p "Ingresa la ruta donde quieres montar el RAID (ej: /mnt/raid): " MOUNT_POINT
+    
+    if [ ! -d "$MOUNT_POINT" ]; then
+        if confirm "El directorio $MOUNT_POINT no existe. ¿Deseas crearlo?"; then
+            sudo mkdir -p "$MOUNT_POINT"
+            show_message "Directorio $MOUNT_POINT creado"
+        else
+            show_error "Se necesita un punto de montaje válido"
+            exit 1
+        fi
+    fi
+    
+    # Crear el filesystem BTRFS
+    show_message "Creando filesystem BTRFS..."
+    
+    device_list=""
+    for disk in "${SELECTED_DISKS[@]}"; do
+        device_list="$device_list /dev/$disk"
+    done
+    
+    sudo mkfs.btrfs -f -d "$RAID_TYPE" -m "$RAID_TYPE" $device_list
+    
+    # Montar el filesystem
+    sudo mount "/dev/${SELECTED_DISKS[0]}" "$MOUNT_POINT"
+    
+    show_message "BTRFS RAID configurado exitosamente"
+    FILESYSTEM_UUID=$(sudo blkid -s UUID -o value "/dev/${SELECTED_DISKS[0]}")
+}
+
+# Función para obtener RAM del sistema
+get_system_ram() {
+    local ram_kb=$(grep MemTotal /proc/meminfo | awk '{print $2}')
+    local ram_gb=$((ram_kb / 1024 / 1024))
+    echo $ram_gb
+}
+
+# Función para configurar ZFS
+setup_zfs() {
+    show_title "Configurando ZFS RAID"
+    
+    # Verificar que ZFS esté disponible (debería estarlo después de check_and_install_requirements)
+    if ! command -v zpool &> /dev/null; then
+        show_error "ZFS no está disponible. Esto no debería suceder después de la verificación de requisitos."
+        exit 1
+    fi
+    
+    # Verificar que el módulo ZFS esté cargado
+    if ! lsmod | grep -q "^zfs "; then
+        show_message "Cargando módulo ZFS..."
+        sudo modprobe zfs
+        sleep 2
+        
+        if ! lsmod | grep -q "^zfs "; then
+            show_error "No se pudo cargar el módulo ZFS"
+            exit 1
+        fi
+    fi
+    
+    # Seleccionar tipo de RAID
+    show_raid_types
+    while true; do
+        read -p "Selecciona el tipo de RAID (1-5): " choice
+        case $choice in
+            1) RAID_TYPE="stripe"; break;;
+            2) RAID_TYPE="mirror"; break;;
+            3) RAID_TYPE="raidz1"; break;;
+            4) RAID_TYPE="raidz2"; break;;
+            5) RAID_TYPE="raidz3"; break;;
+            *) echo "Opción inválida";;
+        esac
+    done
+    
+    select_disks
+    
+    # Solicitar nombre del pool
+    read -p "Ingresa el nombre del pool ZFS: " POOL_NAME
+    
+    # Configurar ARC
+    local system_ram=$(get_system_ram)
+    local recommended_arc=$((system_ram / 4))
+    if [ $recommended_arc -lt 1 ]; then
+        recommended_arc=1
+    fi
+    
+    show_message "RAM del sistema: ${system_ram}GB"
+    show_message "ARC recomendado: ${recommended_arc}GB"
+    
+    read -p "¿Cuántos GB quieres asignar al ARC? [$recommended_arc]: " arc_size
+    arc_size=${arc_size:-$recommended_arc}
+    
+    # Detectar ashift óptimo considerando compatibilidad futura
+    local optimal_ashift=12  # Default para compatibilidad con cache devices
+    local max_sector_size=512
+    local has_4k_sectors=false
+    
+    # Detectar el tamaño de sector más grande entre los discos seleccionados
+    for disk in "${SELECTED_DISKS[@]}"; do
+        if [ -b "/dev/$disk" ]; then
+            local sector_size=$(sudo blockdev --getpbsz "/dev/$disk" 2>/dev/null)
+            if [ -n "$sector_size" ]; then
+                if [ "$sector_size" -gt "$max_sector_size" ]; then
+                    max_sector_size=$sector_size
+                fi
+                if [ "$sector_size" -eq 4096 ]; then
+                    has_4k_sectors=true
+                fi
+            fi
+        fi
+    done
+    
+    # Estrategia de ashift optimizada para compatibilidad
+    if [ "$max_sector_size" -le 512 ] && [ "$has_4k_sectors" = false ]; then
+        # Solo discos 512-byte: usar ashift=12 por compatibilidad con cache futuro
+        optimal_ashift=12
+        show_message "[INFO] 🔧 Usando ashift=12 para compatibilidad con cache devices SSD"
+    else
+        # Calcular ashift basado en el tamaño de sector más grande
+        case $max_sector_size in
+            512) optimal_ashift=12 ;;     # Forzar 12 para compatibilidad
+            1024) optimal_ashift=10 ;;    # 2^10 = 1024 bytes  
+            2048) optimal_ashift=11 ;;    # 2^11 = 2048 bytes
+            4096) optimal_ashift=12 ;;    # 2^12 = 4096 bytes (óptimo)
+            8192) optimal_ashift=13 ;;    # 2^13 = 8192 bytes
+            *) optimal_ashift=12 ;;       # Default seguro
+        esac
+    fi
+    
+    show_message "[INFO] 📊 Configuración de sectores detectada:"
+    show_message "[INFO]    Tamaño de sector máximo en HDDs: ${max_sector_size} bytes"
+    show_message "[INFO]    Ashift del pool: ${optimal_ashift} (2^${optimal_ashift} = $((2**optimal_ashift)) bytes)"
+    show_message "[INFO]    ✅ Esto garantiza compatibilidad con cache devices SSD (4096 bytes)"
+    
+    # Crear el pool ZFS
+    show_message "Creando pool ZFS..."
+    
+    device_list=""
+    for disk in "${SELECTED_DISKS[@]}"; do
+        device_list="$device_list /dev/$disk"
+    done
+    
+    case $RAID_TYPE in
+        "stripe")
+            sudo zpool create -o ashift=$optimal_ashift "$POOL_NAME" $device_list
+            ;;
+        "mirror")
+            sudo zpool create -o ashift=$optimal_ashift "$POOL_NAME" mirror $device_list
+            ;;
+        "raidz1")
+            sudo zpool create -o ashift=$optimal_ashift "$POOL_NAME" raidz $device_list
+            ;;
+        "raidz2")
+            sudo zpool create -o ashift=$optimal_ashift "$POOL_NAME" raidz2 $device_list
+            ;;
+        "raidz3")
+            sudo zpool create -o ashift=$optimal_ashift "$POOL_NAME" raidz3 $device_list
+            ;;
+    esac
+    
+    # Configurar ARC
+    echo $((arc_size * 1024 * 1024 * 1024)) | sudo tee /sys/module/zfs/parameters/zfs_arc_max > /dev/null
+    
+    # Hacer persistente la configuración del ARC
+    sudo mkdir -p /etc/modprobe.d
+    echo "options zfs zfs_arc_max=$((arc_size * 1024 * 1024 * 1024))" | sudo tee /etc/modprobe.d/zfs.conf > /dev/null
+    
+    MOUNT_POINT="/$POOL_NAME"
+    
+    # Configurar NVME para cache y log si está disponible
+    if [ -n "$NVME_DISK" ] && [[ ! " ${SELECTED_DISKS[*]} " =~ " ${NVME_DISK} " ]]; then
+        if confirm "¿Deseas usar el NVME ($NVME_DISK) para ARC2 (L2ARC) y SLOG?"; then
+            show_message "Particionando NVME para cache y log..."
+            
+            # Crear particiones en el NVME
+            sudo parted "/dev/$NVME_DISK" --script mklabel gpt
+            sudo parted "/dev/$NVME_DISK" --script mkpart primary 0% 50%
+            sudo parted "/dev/$NVME_DISK" --script mkpart primary 50% 100%
+            
+            sleep 2
+            
+            # Agregar cache y log al pool
+            sudo zpool add "$POOL_NAME" cache "/dev/${NVME_DISK}p1"
+            sudo zpool add "$POOL_NAME" log "/dev/${NVME_DISK}p2"
+            
+            show_message "NVME configurado como cache y log"
+        fi
+    fi
+    
+    show_message "ZFS pool configurado exitosamente"
+    
+    # Crear datasets dentro del pool principal usando la función reutilizable
+    echo ""
+    if confirm "¿Deseas crear datasets dentro del pool '$POOL_NAME'?"; then
+        create_datasets_in_pool "$POOL_NAME"
+    fi
+    
+    # Preguntar por pools adicionales solo si hay discos restantes
+    remaining_disks=()
+    for disk in "${AVAILABLE_DISKS[@]}"; do
+        if [[ ! " ${SELECTED_DISKS[*]} " =~ " ${disk} " ]] && [ "$disk" != "$NVME_DISK" ]; then
+            # Verificar que el disco no sea demasiado pequeño (ignorar mmcblk0boot)
+            if [[ ! "$disk" =~ mmcblk.*boot ]]; then
+                remaining_disks+=("$disk")
+            fi
+        fi
+    done
+    
+    if [ ${#remaining_disks[@]} -gt 0 ]; then
+        echo ""
+        show_message "Discos disponibles restantes:"
+        for disk in "${remaining_disks[@]}"; do
+            size=$(lsblk -dpno SIZE "/dev/$disk" | tr -d ' ')
+            model=$(lsblk -dpno MODEL "/dev/$disk" | tr -d ' ')
+            echo "  - $disk ($size, $model)"
+        done
+        
+        echo ""
+        echo "💡 INFORMACIÓN SOBRE POOLS ADICIONALES:"
+        echo "   Los pools adicionales son independientes del pool principal."
+        echo "   Útiles para:"
+        echo "   • Separar datos por uso (backup, cache, temp)"
+        echo "   • Diferentes niveles de redundancia"
+        echo "   • Optimizar rendimiento por tipo de carga"
+        echo ""
+        echo "   Ejemplo: Pool principal para datos + Pool SSD para cache"
+        echo ""
+        
+        if confirm "¿Deseas crear pools ZFS adicionales con los discos restantes?"; then
+            # Implementar creación de pools adicionales
+            while [ ${#remaining_disks[@]} -gt 0 ]; do
+                echo ""
+                show_title "Configuración de Pool Adicional"
+                
+                read -p "Nombre del nuevo pool: " additional_pool_name
+                
+                if [ -z "$additional_pool_name" ]; then
+                    show_error "El nombre del pool no puede estar vacío"
+                    continue
+                fi
+                
+                # Verificar que el nombre no exista
+                if zpool list -H -o name 2>/dev/null | grep -q "^${additional_pool_name}$"; then
+                    show_error "Ya existe un pool con el nombre '$additional_pool_name'"
+                    continue
+                fi
+                
+                echo "Discos disponibles para el pool '$additional_pool_name':"
+                for i in "${!remaining_disks[@]}"; do
+                    disk="${remaining_disks[$i]}"
+                    size=$(lsblk -dpno SIZE "/dev/$disk" | tr -d ' ')
+                    model=$(lsblk -dpno MODEL "/dev/$disk" | tr -d ' ')
+                    echo "  $((i+1)). $disk - $size - $model"
+                done
+                
+                echo ""
+                echo "Tipos de RAID disponibles:"
+                echo "1. Stripe - Sin redundancia, máximo rendimiento"
+                echo "2. Mirror - Datos duplicados entre discos"
+                echo "3. RAIDZ1 - Un disco de paridad (mínimo 3 discos)"
+                echo "4. RAIDZ2 - Dos discos de paridad (mínimo 4 discos)"
+                
+                read -p "Selecciona tipo de RAID (1-4): " raid_choice
+                
+                local additional_raid_type=""
+                local min_disks_needed=1
+                
+                case $raid_choice in
+                    1) additional_raid_type="stripe"; min_disks_needed=1;;
+                    2) additional_raid_type="mirror"; min_disks_needed=2;;
+                    3) additional_raid_type="raidz1"; min_disks_needed=3;;
+                    4) additional_raid_type="raidz2"; min_disks_needed=4;;
+                    *) 
+                        show_error "Opción inválida"
+                        continue
+                        ;;
+                esac
+                
+                if [ ${#remaining_disks[@]} -lt $min_disks_needed ]; then
+                    show_error "Se necesitan al menos $min_disks_needed discos para $additional_raid_type"
+                    continue
+                fi
+                
+                # Selección simple para pools adicionales
+                selected_additional_disks=()
+                echo ""
+                echo "Selecciona discos para '$additional_pool_name' (mínimo $min_disks_needed):"
+                echo "Ingresa números separados por espacios (ej: 1 2 3) o 'all' para todos:"
+                
+                read -p "Selección: " disk_selection
+                
+                if [ "$disk_selection" = "all" ]; then
+                    selected_additional_disks=("${remaining_disks[@]}")
+                else
+                    for num in $disk_selection; do
+                        if [[ "$num" =~ ^[0-9]+$ ]] && [ "$num" -ge 1 ] && [ "$num" -le ${#remaining_disks[@]} ]; then
+                            idx=$((num-1))
+                            selected_additional_disks+=("${remaining_disks[$idx]}")
+                        fi
+                    done
+                fi
+                
+                if [ ${#selected_additional_disks[@]} -lt $min_disks_needed ]; then
+                    show_error "Se necesitan al menos $min_disks_needed discos"
+                    continue
+                fi
+                
+                # Crear el pool adicional
+                show_message "Creando pool adicional '$additional_pool_name'..."
+                
+                # Detectar ashift óptimo para el pool adicional
+                local additional_optimal_ashift=12  # Default para compatibilidad
+                local additional_max_sector_size=512
+                local additional_has_4k_sectors=false
+                
+                # Detectar el tamaño de sector más grande entre los discos seleccionados
+                for disk in "${selected_additional_disks[@]}"; do
+                    if [ -b "/dev/$disk" ]; then
+                        local sector_size=$(sudo blockdev --getpbsz "/dev/$disk" 2>/dev/null)
+                        if [ -n "$sector_size" ]; then
+                            if [ "$sector_size" -gt "$additional_max_sector_size" ]; then
+                                additional_max_sector_size=$sector_size
+                            fi
+                            if [ "$sector_size" -eq 4096 ]; then
+                                additional_has_4k_sectors=true
+                            fi
+                        fi
+                    fi
+                done
+                
+                # Estrategia de ashift optimizada para compatibilidad
+                if [ "$additional_max_sector_size" -le 512 ] && [ "$additional_has_4k_sectors" = false ]; then
+                    # Solo discos 512-byte: usar ashift=12 por compatibilidad
+                    additional_optimal_ashift=12
+                    show_message "[INFO] 🔧 Usando ashift=12 para compatibilidad con cache devices"
+                else
+                    # Calcular ashift basado en el tamaño de sector más grande
+                    case $additional_max_sector_size in
+                        512) additional_optimal_ashift=12 ;;     # Forzar 12 para compatibilidad
+                        1024) additional_optimal_ashift=10 ;;
+                        2048) additional_optimal_ashift=11 ;;
+                        4096) additional_optimal_ashift=12 ;;
+                        8192) additional_optimal_ashift=13 ;;
+                        *) additional_optimal_ashift=12 ;;
+                    esac
+                fi
+                
+                show_message "[INFO] 📊 Configuración para pool '$additional_pool_name':"
+                show_message "[INFO]    Tamaño de sector máximo en HDDs: ${additional_max_sector_size} bytes" 
+                show_message "[INFO]    Ashift del pool: ${additional_optimal_ashift} (2^${additional_optimal_ashift} = $((2**additional_optimal_ashift)) bytes)"
+                show_message "[INFO]    ✅ Garantiza compatibilidad con cache devices futuro"
+                
+                # Limpiar discos seleccionados antes de crear el pool
+                for disk in "${selected_additional_disks[@]}"; do
+                    show_message "🧹 Limpiando disco /dev/$disk antes de usarlo..."
+                    clean_disk "$disk"
+                done
+                
+                local device_list=""
+                for disk in "${selected_additional_disks[@]}"; do
+                    device_list="$device_list /dev/$disk"
+                done
+                
+                case $additional_raid_type in
+                    "stripe")
+                        sudo zpool create -o ashift=$additional_optimal_ashift "$additional_pool_name" $device_list
+                        ;;
+                    "mirror")
+                        sudo zpool create -o ashift=$additional_optimal_ashift "$additional_pool_name" mirror $device_list
+                        ;;
+                    "raidz1")
+                        sudo zpool create -o ashift=$additional_optimal_ashift "$additional_pool_name" raidz $device_list
+                        ;;
+                    "raidz2")
+                        sudo zpool create -o ashift=$additional_optimal_ashift "$additional_pool_name" raidz2 $device_list
+                        ;;
+                esac
+                
+                if [ $? -eq 0 ]; then
+                    show_message "✅ Pool '$additional_pool_name' creado exitosamente"
+                    
+                    # Remover discos usados de la lista de disponibles
+                    new_remaining=()
+                    for disk in "${remaining_disks[@]}"; do
+                        if [[ ! " ${selected_additional_disks[*]} " =~ " ${disk} " ]]; then
+                            new_remaining+=("$disk")
+                        fi
+                    done
+                    remaining_disks=("${new_remaining[@]}")
+                    
+                    if [ ${#remaining_disks[@]} -eq 0 ]; then
+                        show_message "No quedan más discos disponibles"
+                        break
+                    fi
+                    
+                    if ! confirm "¿Crear otro pool adicional?"; then
+                        break
+                    fi
+                else
+                    show_error "❌ Error creando el pool '$additional_pool_name'"
+                fi
+            done
+        fi
+    else
+        show_message "ℹ️  No hay discos adicionales disponibles para más pools"
+    fi
+}
+
+# Función para mostrar resumen
+show_summary() {
+    show_title "Resumen de Configuración"
+    
+    echo "Sistema de archivos: $FILESYSTEM_TYPE"
+    echo "Tipo de RAID: $RAID_TYPE"
+    echo "Discos utilizados: ${SELECTED_DISKS[*]}"
+    echo "Punto de montaje: $MOUNT_POINT"
+    
+    if [ "$FILESYSTEM_TYPE" = "zfs" ]; then
+        echo "Nombre del pool: $POOL_NAME"
+        echo "ARC configurado: ${arc_size}GB"
+    fi
+    
+    echo "Capacidad aproximada del RAID: $(( RAID_CAPACITY / 1024 / 1024 / 1024 )) GB"
+}
+
+# Función para configurar montaje automático
+setup_auto_mount() {
+    if confirm "¿Deseas montar automáticamente al iniciar el sistema?"; then
+        if [ "$FILESYSTEM_TYPE" = "btrfs" ]; then
+            # Agregar entrada a /etc/fstab para BTRFS
+            echo "UUID=$FILESYSTEM_UUID $MOUNT_POINT btrfs defaults 0 0" | sudo tee -a /etc/fstab
+            show_message "Montaje automático configurado en /etc/fstab"
+        else
+            # Para ZFS, habilitar el servicio de importación automática
+            sudo systemctl enable zfs-import-cache
+            sudo systemctl enable zfs-mount
+            sudo systemctl enable zfs.target
+            show_message "Servicios ZFS habilitados para montaje automático"
+        fi
+    fi
+}
+
+# Función principal
+main() {
+    show_title "Script de Configuración RAID para Raspberry Pi"
+    
+    # Verificar si se ejecuta como root o con sudo
+    if [ "$EUID" -eq 0 ]; then
+        show_error "No ejecutes este script como root. Usa sudo cuando sea necesario."
+        exit 1
+    fi
+    
+    # Verificar e instalar requisitos
+    check_and_install_requirements
+    
+    # Detectar configuraciones RAID existentes (ZFS, BTRFS, MDADM, LVM)
+    if detect_existing_raid_configurations; then
+        # Continúa con configuración normal
+        detect_disks
+        select_filesystem
+        
+        if [ "$FILESYSTEM_TYPE" = "btrfs" ]; then
+            setup_btrfs
+        else
+            setup_zfs
+        fi
+        
+        show_summary
+        setup_auto_mount
+        
+        show_message "¡Configuración RAID completada exitosamente!"
+        show_message "El RAID está montado en: $MOUNT_POINT"
+        
+        # Ofrecer gestión de datasets después de crear el pool
+        offer_post_creation_dataset_management
+    fi
+    # Si detectó configuraciones RAID existentes y el usuario eligió gestionarlas, 
+    # la función detect_existing_raid_configurations ya manejó todo
+}
+
+# Función para ofrecer gestión de datasets después de crear un pool
+offer_post_creation_dataset_management() {
+    if [ "$FILESYSTEM_TYPE" = "zfs" ] && [ -n "$POOL_NAME" ]; then
+        echo ""
+        show_title "Gestión Post-Creación"
+        echo ""
+        echo "🎉 ¡Pool ZFS '$POOL_NAME' creado exitosamente!"
+        echo ""
+        
+        # Configurar atime primero (recomendado)
+        configure_atime_settings "$POOL_NAME"
+        
+        while true; do
+            echo ""
+            echo "🛠️  OPCIONES ADICIONALES:"
+            echo "   1. 🚀 Configurar dispositivos de cache (L2ARC/SLOG) - RECOMENDADO"
+            echo "   2. 📁 Gestionar datasets en '$POOL_NAME'"
+            echo "   3. 📸 Crear snapshots iniciales"
+            echo "   4. 📊 Ver estado completo del pool"
+            echo "   5. ⚙️  Reconfigurar atime"
+            echo "   6. ✅ Finalizar"
+            echo ""
+            echo "💡 NOTA: Los dispositivos de cache (opción 1) deben ser SSD o NVMe"
+            echo "   ⚠️  NO usar discos mecánicos - pueden empeorar el rendimiento"
+            echo ""
+            
+            read -p "👉 Selecciona una opción (1-6): " choice
+            case $choice in
+                1)
+                    echo ""
+                    setup_cache_devices "$POOL_NAME"
+                    ;;
+                2)
+                    echo ""
+                    create_datasets_in_pool "$POOL_NAME"
+                    ;;
+                3)
+                    create_initial_snapshots "$POOL_NAME"
+                    ;;
+                4)
+                    if [ -z "$POOL_NAME" ]; then
+                        show_error "Error: POOL_NAME no está definido. Esto no debería ocurrir."
+                        echo "Información de debug:"
+                        echo "  FILESYSTEM_TYPE: $FILESYSTEM_TYPE"
+                        echo "  Pools disponibles: $(zpool list -H -o name 2>/dev/null | tr '\n' ' ')"
+                        read -p "Presiona Enter para continuar..."
+                    else
+                        show_pool_status "$POOL_NAME"
+                    fi
+                    ;;
+                5)
+                    echo ""
+                    configure_atime_settings "$POOL_NAME"
+                    ;;
+                6)
+                    show_message "¡Configuración completada!"
+                    echo ""
+                    echo "📊 RESUMEN FINAL:"
+                    echo "   Pool ZFS: $POOL_NAME"
+                    echo "   Estado: $(zpool list -H -o health "$POOL_NAME" 2>/dev/null || echo 'Desconocido')"
+                    echo "   Tamaño: $(zpool list -H -o size "$POOL_NAME" 2>/dev/null || echo 'Desconocido')"
+                    echo "   Usado: $(zpool list -H -o alloc "$POOL_NAME" 2>/dev/null || echo 'Desconocido')"
+                    echo "   Libre: $(zpool list -H -o free "$POOL_NAME" 2>/dev/null || echo 'Desconocido')"
+                    echo ""
+                    echo "✅ Configuración de RAID ZFS completada exitosamente!"
+                    break
+                    ;;
+                *)
+                    echo "❌ Opción inválida. Selecciona 1, 2, 3, 4, 5 o 6."
+                    ;;
+            esac
+            echo ""
+        done
+    fi
+    
+    # Asegurar que las variables estén definidas para evitar errores
+    if [ -z "$POOL_NAME" ] && [ "$FILESYSTEM_TYPE" = "zfs" ]; then
+        echo "⚠️  ADVERTENCIA: POOL_NAME no está definido al final de la gestión post-creación."
+        echo "   Esto podría indicar un problema en el script."
+    fi
+}
+
+# Función para configurar atime en ZFS
+configure_atime_settings() {
+    local pool_name="$1"
+    
+    show_title "Configuración de Atime en ZFS"
+    echo ""
+    echo "💡 INFORMACIÓN SOBRE ATIME:"
+    echo "   atime (access time) registra la última vez que se accedió a un archivo."
+    echo "   En sistemas con muchas operaciones de lectura, puede impactar el rendimiento."
+    echo ""
+    echo "📊 OPCIONES DISPONIBLES EN ZFS:"
+    echo "   1. off        - No registrar atime (RECOMENDADO para rendimiento)"
+    echo "   2. on         - Registrar atime completo (puede reducir rendimiento)"
+    echo ""
+    echo "💡 RECOMENDACIÓN: Opción 1 (off) para máximo rendimiento"
+    echo "   ⚠️  NOTA: ZFS solo soporta 'on' u 'off' (no soporta 'relatime')"
+    echo "   La mayoría de aplicaciones no necesitan atime y deshabilitarlo"
+    echo "   mejora significativamente el rendimiento de lectura."
+    echo ""
+    
+    while true; do
+        read -p "👉 Selecciona configuración de atime (1-2) [1]: " atime_choice
+        atime_choice=${atime_choice:-1}
+        
+        case $atime_choice in
+            1)
+                local atime_setting="off"
+                local description="Deshabilitado (máximo rendimiento)"
+                break
+                ;;
+            2)
+                local atime_setting="on"
+                local description="Habilitado (impacto en rendimiento)"
+                break
+                ;;
+            *)
+                echo "❌ Opción inválida. Selecciona 1 o 2."
+                ;;
+        esac
+    done
+    
+    show_message "Configurando atime=$atime_setting en el pool '$pool_name'..."
+    
+    # Aplicar configuración al pool raíz
+    if sudo zfs set atime="$atime_setting" "$pool_name"; then
+        show_message "✅ atime configurado como '$atime_setting' en '$pool_name'"
+    else
+        show_error "❌ Error configurando atime en '$pool_name'"
+        return 1
+    fi
+    
+    # Aplicar a todos los datasets existentes
+    local datasets=$(zfs list -H -o name -r "$pool_name" 2>/dev/null | grep -v "^${pool_name}$")
+    if [ -n "$datasets" ]; then
+        show_message "Aplicando configuración a datasets existentes..."
+        for dataset in $datasets; do
+            if sudo zfs set atime="$atime_setting" "$dataset"; then
+                show_message "  ✅ $dataset configurado"
+            else
+                show_warning "  ⚠️  Error configurando $dataset"
+            fi
+        done
+    fi
+    
+    echo ""
+    show_message "📊 CONFIGURACIÓN ATIME COMPLETADA:"
+    echo "   Pool: $pool_name"
+    echo "   Configuración: $atime_setting ($description)"
+    echo "   Aplicado a: pool y todos los datasets existentes"
+    echo ""
+    echo "💡 Nota: Los nuevos datasets heredarán esta configuración automáticamente"
+}
+
+# Función para configurar dispositivos de cache (L2ARC y SLOG)
+setup_cache_devices() {
+    local pool_name="$1"
+    
+    show_title "Configuración de Dispositivos de Cache para '$pool_name'"
+    echo ""
+    echo "⚠️  ADVERTENCIA CRÍTICA SOBRE DISPOSITIVOS DE CACHE:"
+    echo "   🔥 SOLO USAR SSD O NVME - NUNCA DISCOS MECÁNICOS"
+    echo "   🚫 Los discos mecánicos (HDD) como cache EMPEORARÁN el rendimiento"
+    echo "   ✅ Los dispositivos de cache deben ser MÁS RÁPIDOS que el almacenamiento principal"
+    echo ""
+    echo "💡 INFORMACIÓN SOBRE DISPOSITIVOS DE CACHE:"
+    echo ""
+    echo "🚀 L2ARC (Level 2 Adaptive Replacement Cache):"
+    echo "   • Cache de segundo nivel para lecturas frecuentes"
+    echo "   • Ideal: SSD rápido (NVMe > SATA SSD > USB 3.0)"
+    echo "   • Mejora rendimiento de lectura en datasets accedidos frecuentemente"
+    echo "   • No es crítico - si falla, el pool sigue funcionando"
+    echo ""
+    echo "📝 SLOG (Separate Intent Log):"
+    echo "   • Log de transacciones para escrituras síncronas"
+    echo "   • Ideal: SSD con baja latencia y alta resistencia (NVMe con power-loss protection)"
+    echo "   • Mejora rendimiento de escrituras síncronas (bases de datos, VMs)"
+    echo "   • Crítico para integridad - usar dispositivos confiables"
+    echo ""
+    echo "⚠️  RECOMENDACIÓN IMPORTANTE:"
+    echo "   🔥 USAR DISPOSITIVOS NVME ES ALTAMENTE RECOMENDADO PARA CACHE"
+    echo "   • NVMe ofrece la latencia más baja y mayor throughput"
+    echo "   • Usar dispositivos lentos (USB, HDD) como cache puede EMPEORAR el rendimiento"
+    echo "   • Si no tienes NVMe disponible, considera omitir la configuración de cache"
+    echo ""
+    
+    # Detectar dispositivos disponibles con clasificación por tipo
+    local pool_devices=$(zpool status "$pool_name" 2>/dev/null | grep -E "^\s+[a-z]" | awk '{print $1}' | grep -v "raidz\|mirror\|spare\|log\|cache\|replacing")
+    local available_cache_devices=()
+    local nvme_devices=()
+    local ssd_devices=()
+    local other_devices=()
+    
+    # Obtener lista de todos los discos disponibles y clasificarlos
+    local available_cache_devices=()
+    local nvme_devices=()
+    local ssd_devices=()
+    local other_devices=()
+    local in_use_devices=()
+    
+    while IFS= read -r disk; do
+        local disk_name=$(basename "$disk")
+        
+        # Excluir dispositivos del sistema y de arranque
+        if [[ "$disk_name" == "mmcblk0"* ]] || [[ "$disk_name" == *"boot"* ]]; then
+            continue
+        fi
+        
+        # Verificar que el dispositivo tenga tamaño válido
+        local size_raw=$(lsblk -dpno SIZE "/dev/$disk_name" 2>/dev/null | tr -d ' ')
+        if [[ "$size_raw" == "0B" ]] || [[ -z "$size_raw" ]]; then
+            continue
+        fi
+        
+        # Verificar que no sea el disco del sistema operativo
+        local mount_check=$(lsblk -no MOUNTPOINT "/dev/$disk_name" 2>/dev/null | grep -E "^/$|^/boot|^/home")
+        if [ -n "$mount_check" ]; then
+            continue
+        fi
+        
+        # Excluir discos ya en uso por el pool principal
+        if echo "$pool_devices" | grep -q "^${disk_name}$"; then
+            continue
+        fi
+        
+        # Verificar estado de uso del dispositivo
+        local raid_status=$(check_disk_raid_status "$disk_name")
+        local usage_status=""
+        
+        if [ -n "$raid_status" ]; then
+            # Dispositivo en uso - agregar a lista de dispositivos en uso
+            usage_status="EN_USO"
+            in_use_devices+=("$disk_name:$raid_status")
+        else
+            # Dispositivo disponible
+            usage_status="DISPONIBLE"
+        fi
+        
+        # Agregar a la lista general y clasificar por tipo
+        available_cache_devices+=("$disk_name:$usage_status")
+        
+        if [[ "$disk_name" == nvme* ]]; then
+            nvme_devices+=("$disk_name:$usage_status")
+        elif lsblk -dpno ROTA "/dev/$disk_name" 2>/dev/null | grep -q "0"; then
+            # ROTA=0 significa SSD
+            ssd_devices+=("$disk_name:$usage_status")
+        else
+            other_devices+=("$disk_name:$usage_status")
+        fi
+        
+    done < <(lsblk -dpno NAME | grep -v "^/dev/loop")
+    
+    # Mostrar dispositivos disponibles clasificados por tipo
+    echo "📀 DISPOSITIVOS PARA CACHE:"
+    echo ""
+    
+    if [ ${#nvme_devices[@]} -gt 0 ]; then
+        echo "🚀 DISPOSITIVOS NVME (RECOMENDADOS):"
+        for device_info in "${nvme_devices[@]}"; do
+            local device_name=$(echo "$device_info" | cut -d: -f1)
+            local usage_status=$(echo "$device_info" | cut -d: -f2)
+            local size=$(lsblk -dpno SIZE "/dev/$device_name" 2>/dev/null | tr -d ' ')
+            local model=$(lsblk -dpno MODEL "/dev/$device_name" 2>/dev/null | tr -d ' ')
+            
+            if [ "$usage_status" = "DISPONIBLE" ]; then
+                echo "   ✅ $device_name - $size - $model"
+            else
+                echo "   ⚠️  $device_name - $size - $model (EN USO: $usage_status - se puede limpiar)"
+            fi
+        done
+        echo ""
+    fi
+    
+    if [ ${#ssd_devices[@]} -gt 0 ]; then
+        echo "💾 DISPOSITIVOS SSD (ACEPTABLES):"
+        for device_info in "${ssd_devices[@]}"; do
+            local device_name=$(echo "$device_info" | cut -d: -f1)
+            local usage_status=$(echo "$device_info" | cut -d: -f2)
+            local size=$(lsblk -dpno SIZE "/dev/$device_name" 2>/dev/null | tr -d ' ')
+            local model=$(lsblk -dpno MODEL "/dev/$device_name" 2>/dev/null | tr -d ' ')
+            
+            if [ "$usage_status" = "DISPONIBLE" ]; then
+                echo "   ⚠️  $device_name - $size - $model"
+            else
+                echo "   ⚠️  $device_name - $size - $model (EN USO: $usage_status - se puede limpiar)"
+            fi
+        done
+        echo ""
+    fi
+    
+    if [ ${#other_devices[@]} -gt 0 ]; then
+        echo "🐌 OTROS DISPOSITIVOS (NO RECOMENDADOS PARA CACHE):"
+        for device_info in "${other_devices[@]}"; do
+            local device_name=$(echo "$device_info" | cut -d: -f1)
+            local usage_status=$(echo "$device_info" | cut -d: -f2)
+            local size=$(lsblk -dpno SIZE "/dev/$device_name" 2>/dev/null | tr -d ' ')
+            local model=$(lsblk -dpno MODEL "/dev/$device_name" 2>/dev/null | tr -d ' ')
+            
+            if [ "$usage_status" = "DISPONIBLE" ]; then
+                echo "   ❌ $device_name - $size - $model"
+            else
+                echo "   ❌ $device_name - $size - $model (EN USO: $usage_status - se puede limpiar)"
+            fi
+        done
+        echo ""
+    fi
+    
+    # Mostrar información sobre dispositivos en uso
+    if [ ${#in_use_devices[@]} -gt 0 ]; then
+        echo "💡 INFORMACIÓN SOBRE DISPOSITIVOS EN USO:"
+        echo "   • Los dispositivos marcados como 'EN USO' pueden ser limpiados y reutilizados"
+        echo "   • ⚠️  ADVERTENCIA: Limpiar un dispositivo DESTRUIRÁ todos los datos"
+        echo "   • Se te pedirá confirmación antes de proceder con dispositivos en uso"
+        echo ""
+    fi
+    
+    # Verificar dispositivos disponibles y mostrar recomendación apropiada
+    if [ ${#nvme_devices[@]} -eq 0 ] && [ ${#ssd_devices[@]} -eq 0 ]; then
+        # No hay NVMe ni SSD - advertencia crítica
+        echo "⚠️  ADVERTENCIA CRÍTICA:"
+        echo "   🔥 NO SE DETECTARON DISPOSITIVOS NVMe O SSD ADECUADOS"
+        echo "   • Los dispositivos de cache deben ser más rápidos que el almacenamiento principal"
+        echo "   • Usar dispositivos lentos como cache puede REDUCIR el rendimiento del sistema"
+        echo "   • Se recomienda FUERTEMENTE conseguir un dispositivo NVMe o SSD para cache"
+        echo ""
+        
+        if ! confirm "¿Deseas continuar sin dispositivos rápidos (MUY NO RECOMENDADO)?"; then
+            show_message "Configuración de cache cancelada - se recomienda conseguir un dispositivo NVMe o SSD"
+            return 0
+        fi
+        echo ""
+    elif [ ${#nvme_devices[@]} -eq 0 ] && [ ${#ssd_devices[@]} -gt 0 ]; then
+        # Solo hay SSD, no NVMe - recomendación suave
+        echo "💡 RECOMENDACIÓN:"
+        echo "   ✅ Se detectaron dispositivos SSD (aceptables para cache)"
+        echo "   🚀 Para rendimiento óptimo, considera usar NVMe en el futuro"
+        echo "   📊 Los SSD son adecuados para la mayoría de casos de uso"
+        echo ""
+    fi
+    
+    if [ ${#available_cache_devices[@]} -eq 0 ]; then
+        show_warning "No se encontraron dispositivos disponibles para cache"
+        show_message "Todos los dispositivos están en uso o no son adecuados"
+        return 0
+    fi
+    
+    echo "️  OPCIONES DE CONFIGURACIÓN:"
+    echo "   1. Configurar solo L2ARC (cache de lectura)"
+    echo "   2. Configurar solo SLOG (log de escritura)"
+    echo "   3. Configurar ambos L2ARC y SLOG"
+    echo "   4. Configurar particiones en un dispositivo (L2ARC + SLOG)"
+    echo "   5. Cancelar configuración"
+    echo ""
+    
+    while true; do
+        read -p "👉 Selecciona una opción (1-5): " config_choice
+        case $config_choice in
+            1)
+                if setup_l2arc_only "$pool_name" "${available_cache_devices[@]}"; then
+                    break
+                else
+                    echo ""
+                    echo "️  OPCIONES DE CONFIGURACIÓN:"
+                    echo "   1. Configurar solo L2ARC (cache de lectura)"
+                    echo "   2. Configurar solo SLOG (log de escritura)"
+                    echo "   3. Configurar ambos L2ARC y SLOG"
+                    echo "   4. Configurar particiones en un dispositivo (L2ARC + SLOG)"
+                    echo "   5. Cancelar configuración"
+                    echo ""
+                fi
+                ;;
+            2)
+                if setup_slog_only "$pool_name" "${available_cache_devices[@]}"; then
+                    break
+                else
+                    echo ""
+                    echo "️  OPCIONES DE CONFIGURACIÓN:"
+                    echo "   1. Configurar solo L2ARC (cache de lectura)"
+                    echo "   2. Configurar solo SLOG (log de escritura)"
+                    echo "   3. Configurar ambos L2ARC y SLOG"
+                    echo "   4. Configurar particiones en un dispositivo (L2ARC + SLOG)"
+                    echo "   5. Cancelar configuración"
+                    echo ""
+                fi
+                ;;
+            3)
+                if setup_l2arc_and_slog_separate "$pool_name" "${available_cache_devices[@]}"; then
+                    break
+                else
+                    echo ""
+                    echo "️  OPCIONES DE CONFIGURACIÓN:"
+                    echo "   1. Configurar solo L2ARC (cache de lectura)"
+                    echo "   2. Configurar solo SLOG (log de escritura)"
+                    echo "   3. Configurar ambos L2ARC y SLOG"
+                    echo "   4. Configurar particiones en un dispositivo (L2ARC + SLOG)"
+                    echo "   5. Cancelar configuración"
+                    echo ""
+                fi
+                ;;
+            4)
+                if setup_partitioned_cache "$pool_name" "${available_cache_devices[@]}"; then
+                    break
+                else
+                    echo ""
+                    echo "️  OPCIONES DE CONFIGURACIÓN:"
+                    echo "   1. Configurar solo L2ARC (cache de lectura)"
+                    echo "   2. Configurar solo SLOG (log de escritura)"
+                    echo "   3. Configurar ambos L2ARC y SLOG"
+                    echo "   4. Configurar particiones en un dispositivo (L2ARC + SLOG)"
+                    echo "   5. Cancelar configuración"
+                    echo ""
+                fi
+                ;;
+            5)
+                show_message "Configuración de cache cancelada"
+                return 0
+                ;;
+            *)
+                echo "❌ Opción inválida. Selecciona 1, 2, 3, 4 o 5."
+                echo ""
+                echo "️  OPCIONES DE CONFIGURACIÓN:"
+                echo "   1. Configurar solo L2ARC (cache de lectura)"
+                echo "   2. Configurar solo SLOG (log de escritura)"
+                echo "   3. Configurar ambos L2ARC y SLOG"
+                echo "   4. Configurar particiones en un dispositivo (L2ARC + SLOG)"
+                echo "   5. Cancelar configuración"
+                echo ""
+                ;;
+        esac
+    done
+}
+
+# Función para configurar solo L2ARC
+setup_l2arc_only() {
+    local pool_name="$1"
+    shift
+    local available_devices=("$@")
+    
+    show_title "Configuración de L2ARC para '$pool_name'"
+    echo ""
+    echo "📖 Selecciona el dispositivo para L2ARC (cache de lectura):"
+    
+    for i in "${!available_devices[@]}"; do
+        local device_info="${available_devices[$i]}"
+        local device_name=$(echo "$device_info" | cut -d: -f1)
+        local usage_status=$(echo "$device_info" | cut -d: -f2)
+        local size=$(lsblk -dpno SIZE "/dev/$device_name" | tr -d ' ')
+        local model=$(lsblk -dpno MODEL "/dev/$device_name" | tr -d ' ')
+        
+        if [ "$usage_status" = "DISPONIBLE" ]; then
+            echo "  $((i+1)). $device_name - $size - $model"
+        else
+            echo "  $((i+1)). $device_name - $size - $model (EN USO: $usage_status)"
+        fi
+    done
+    
+    while true; do
+        read -p "👉 Selecciona dispositivo (1-${#available_devices[@]}): " device_choice
+        if [[ "$device_choice" =~ ^[0-9]+$ ]] && [ "$device_choice" -ge 1 ] && [ "$device_choice" -le ${#available_devices[@]} ]; then
+            local device_info="${available_devices[$((device_choice-1))]}"
+            local selected_device=$(echo "$device_info" | cut -d: -f1)
+            local usage_status=$(echo "$device_info" | cut -d: -f2)
+            
+            # Verificar si el dispositivo está en uso
+            if [ "$usage_status" != "DISPONIBLE" ]; then
+                echo ""
+                echo "⚠️  ADVERTENCIA: El dispositivo $selected_device está EN USO"
+                echo "   📁 Uso actual: $usage_status"
+                echo "   💀 Limpiar este dispositivo DESTRUIRÁ todos los datos"
+                echo ""
+                if ! confirm "¿Estás SEGURO de que quieres limpiar y usar $selected_device para L2ARC?"; then
+                    echo "Selecciona otro dispositivo..."
+                    continue
+                fi
+            fi
+            
+            # Verificar si es un disco mecánico
+            if ! lsblk -dpno ROTA "/dev/$selected_device" 2>/dev/null | grep -q "0"; then
+                echo ""
+                echo "🚨 ADVERTENCIA: El dispositivo $selected_device parece ser un DISCO MECÁNICO"
+                echo "   ❌ Los discos mecánicos NO deben usarse como cache"
+                echo "   📉 Esto EMPEORARÁ significativamente el rendimiento del sistema"
+                echo "   ✅ Usa solo SSD o NVMe para cache"
+                echo ""
+                if ! confirm "¿Estás SEGURO de que quieres usar este disco mecánico? (MUY NO RECOMENDADO)"; then
+                    echo "Selecciona otro dispositivo..."
+                    continue
+                fi
+                echo ""
+                if ! confirm "⚠️  ÚLTIMA ADVERTENCIA: ¿Realmente quieres proceder con un disco mecánico?"; then
+                    echo "Selecciona otro dispositivo..."
+                    continue
+                fi
+            fi
+            break
+        else
+            echo "❌ Selección inválida. Usa números del 1 al ${#available_devices[@]}."
+        fi
+    done
+    
+    # Confirmar y aplicar
+    echo ""
+    show_warning "⚠️  Esto limpiará completamente el dispositivo /dev/$selected_device"
+    if confirm "¿Continuar con la configuración de L2ARC en /dev/$selected_device?"; then
+        show_message "Preparando dispositivo /dev/$selected_device para L2ARC..."
+        
+        # Limpiar dispositivo
+        clean_disk "$selected_device"
+        
+        # Agregar como L2ARC
+        show_message "Agregando /dev/$selected_device como L2ARC al pool '$pool_name'..."
+        if sudo zpool add "$pool_name" cache "/dev/$selected_device"; then
+            show_message "✅ L2ARC configurado exitosamente"
+            echo ""
+            show_message "📊 CONFIGURACIÓN L2ARC COMPLETADA:"
+            echo "   Pool: $pool_name"
+            echo "   Dispositivo L2ARC: /dev/$selected_device"
+            echo "   Función: Cache de lectura (mejora acceso a datos frecuentes)"
+            echo "   💡 Cache devices no requieren compatibilidad de ashift"
+            return 0
+        else
+            show_error "❌ Error configurando L2ARC"
+            return 1
+        fi
+    else
+        show_message "Configuración de L2ARC cancelada"
+        return 1
+    fi
+}
+
+# Función para configurar solo SLOG
+setup_slog_only() {
+    local pool_name="$1"
+    shift
+    local available_devices=("$@")
+    
+    show_title "Configuración de SLOG para '$pool_name'"
+    echo ""
+    echo "⚠️  IMPORTANTE - REQUISITOS PARA SLOG:"
+    echo "   • Usar SSD de alta calidad con protección contra cortes de energía"
+    echo "   • Evitar dispositivos USB o SD para SLOG"
+    echo "   • Preferir NVMe > SATA SSD > otros"
+    echo ""
+    echo "📖 Selecciona el dispositivo para SLOG (log de escritura):"
+    
+    for i in "${!available_devices[@]}"; do
+        local device_info="${available_devices[$i]}"
+        local device_name=$(echo "$device_info" | cut -d: -f1)
+        local usage_status=$(echo "$device_info" | cut -d: -f2)
+        local size=$(lsblk -dpno SIZE "/dev/$device_name" | tr -d ' ')
+        local model=$(lsblk -dpno MODEL "/dev/$device_name" | tr -d ' ')
+        local recommendation=""
+        
+        if [[ "$device_name" == nvme* ]]; then
+            recommendation=" ⭐ RECOMENDADO"
+        elif lsblk -dpno ROTA "/dev/$device_name" | grep -q "0"; then
+            recommendation=" ✅ ADECUADO"
+        else
+            recommendation=" ⚠️  NO RECOMENDADO (HDD)"
+        fi
+        
+        if [ "$usage_status" = "DISPONIBLE" ]; then
+            echo "  $((i+1)). $device_name - $size - $model$recommendation"
+        else
+            echo "  $((i+1)). $device_name - $size - $model$recommendation (EN USO: $usage_status)"
+        fi
+    done
+    
+    while true; do
+        read -p "👉 Selecciona dispositivo (1-${#available_devices[@]}): " device_choice
+        if [[ "$device_choice" =~ ^[0-9]+$ ]] && [ "$device_choice" -ge 1 ] && [ "$device_choice" -le ${#available_devices[@]} ]; then
+            local device_info="${available_devices[$((device_choice-1))]}"
+            local selected_device=$(echo "$device_info" | cut -d: -f1)
+            local usage_status=$(echo "$device_info" | cut -d: -f2)
+            
+            # Verificar si el dispositivo está en uso
+            if [ "$usage_status" != "DISPONIBLE" ]; then
+                echo ""
+                echo "⚠️  ADVERTENCIA CRÍTICA: El dispositivo $selected_device está EN USO"
+                echo "   📁 Uso actual: $usage_status"
+                echo "   💀 Limpiar este dispositivo DESTRUIRÁ todos los datos"
+                echo "   🔧 SLOG es crítico - asegúrate de que puedes perder estos datos"
+                echo ""
+                if ! confirm "¿Estás SEGURO de que quieres limpiar y usar $selected_device para SLOG?"; then
+                    echo "Selecciona otro dispositivo..."
+                    continue
+                fi
+            fi
+            break
+        else
+            echo "❌ Selección inválida. Usa números del 1 al ${#available_devices[@]}."
+        fi
+    done
+    
+    # Verificar si es adecuado para SLOG
+    if ! [[ "$selected_device" == nvme* ]] && lsblk -dpno ROTA "/dev/$selected_device" | grep -q "1"; then
+        echo ""
+        echo "🚨 ADVERTENCIA CRÍTICA: El dispositivo $selected_device es un DISCO MECÁNICO"
+        echo "   ❌ Los discos mecánicos NO deben usarse como SLOG"
+        echo "   💀 Esto puede causar PÉRDIDA DE DATOS y rendimiento EXTREMADAMENTE pobre"
+        echo "   🔧 SLOG requiere dispositivos de baja latencia (SSD/NVMe)"
+        echo "   ⚡ Un SLOG lento puede bloquear TODAS las escrituras del sistema"
+        echo ""
+        if ! confirm "¿Estás SEGURO de que quieres usar este disco mecánico para SLOG? (PELIGROSO)"; then
+            show_message "Configuración cancelada por el usuario"
+            return 0
+        fi
+        echo ""
+        if ! confirm "⚠️  ÚLTIMA ADVERTENCIA: ¿Realmente quieres proceder? (PUEDE CAUSAR PROBLEMAS GRAVES)"; then
+            show_message "Configuración cancelada por el usuario"
+            return 0
+        fi
+    fi
+    
+    # Confirmar y aplicar
+    echo ""
+    show_warning "⚠️  Esto limpiará completamente el dispositivo /dev/$selected_device"
+    if confirm "¿Continuar con la configuración de SLOG en /dev/$selected_device?"; then
+        show_message "Preparando dispositivo /dev/$selected_device para SLOG..."
+        
+        # Limpiar dispositivo
+        clean_disk "$selected_device"
+        
+        # Agregar como SLOG
+        show_message "Agregando /dev/$selected_device como SLOG al pool '$pool_name'..."
+        if sudo zpool add "$pool_name" log "/dev/$selected_device"; then
+            show_message "✅ SLOG configurado exitosamente"
+            echo ""
+            show_message "📊 CONFIGURACIÓN SLOG COMPLETADA:"
+            echo "   Pool: $pool_name"
+            echo "   Dispositivo SLOG: /dev/$selected_device"
+            echo "   Función: Log de escritura (mejora escrituras síncronas)"
+            echo "   💡 Cache devices no requieren compatibilidad de ashift"
+            return 0
+        else
+            show_error "❌ Error configurando SLOG"
+            return 1
+        fi
+    else
+        show_message "Configuración de SLOG cancelada"
+        return 1
+    fi
+}
+
+# Función para configurar L2ARC y SLOG en dispositivos separados
+setup_l2arc_and_slog_separate() {
+    local pool_name="$1"
+    shift
+    local available_devices=("$@")
+    
+    if [ ${#available_devices[@]} -lt 2 ]; then
+        show_error "Se necesitan al menos 2 dispositivos disponibles para configurar L2ARC y SLOG por separado"
+        return 1
+    fi
+    
+    show_title "Configuración de L2ARC y SLOG Separados para '$pool_name'"
+    echo ""
+    echo "📖 Selecciona dispositivos para L2ARC y SLOG:"
+    echo ""
+    
+    # Mostrar dispositivos con recomendaciones
+    for i in "${!available_devices[@]}"; do
+        local device_info="${available_devices[$i]}"
+        local device_name=$(echo "$device_info" | cut -d: -f1)
+        local usage_status=$(echo "$device_info" | cut -d: -f2)
+        local size=$(lsblk -dpno SIZE "/dev/$device_name" | tr -d ' ')
+        local model=$(lsblk -dpno MODEL "/dev/$device_name" | tr -d ' ')
+        local recommendation=""
+        
+        if [[ "$device_name" == nvme* ]]; then
+            recommendation=" ⭐ EXCELENTE para SLOG, BUENO para L2ARC"
+        elif lsblk -dpno ROTA "/dev/$device_name" | grep -q "0"; then
+            recommendation=" ✅ BUENO para L2ARC, REGULAR para SLOG"
+        else
+            recommendation=" ⚠️  SOLO para L2ARC (NO para SLOG)"
+        fi
+        
+        if [ "$usage_status" = "DISPONIBLE" ]; then
+            echo "  $((i+1)). $device_name - $size - $model$recommendation"
+        else
+            echo "  $((i+1)). $device_name - $size - $model$recommendation (EN USO: $usage_status)"
+        fi
+    done
+    
+    # Seleccionar dispositivo para L2ARC
+    echo ""
+    echo "🚀 SELECCIÓN DE L2ARC:"
+    while true; do
+        read -p "👉 Dispositivo para L2ARC (1-${#available_devices[@]}): " l2arc_choice
+        if [[ "$l2arc_choice" =~ ^[0-9]+$ ]] && [ "$l2arc_choice" -ge 1 ] && [ "$l2arc_choice" -le ${#available_devices[@]} ]; then
+            local device_info="${available_devices[$((l2arc_choice-1))]}"
+            local l2arc_device=$(echo "$device_info" | cut -d: -f1)
+            local l2arc_usage=$(echo "$device_info" | cut -d: -f2)
+            
+            # Verificar si el dispositivo L2ARC está en uso
+            if [ "$l2arc_usage" != "DISPONIBLE" ]; then
+                echo ""
+                echo "⚠️  ADVERTENCIA: El dispositivo $l2arc_device está EN USO"
+                echo "   📁 Uso actual: $l2arc_usage"
+                echo "   💀 Limpiar este dispositivo DESTRUIRÁ todos los datos"
+                echo ""
+                if ! confirm "¿Continuar con $l2arc_device para L2ARC?"; then
+                    echo "Selecciona otro dispositivo..."
+                    continue
+                fi
+            fi
+            break
+        else
+            echo "❌ Selección inválida. Usa números del 1 al ${#available_devices[@]}."
+        fi
+    done
+    
+    # Seleccionar dispositivo para SLOG (excluyendo el ya seleccionado)
+    echo ""
+    echo "📝 SELECCIÓN DE SLOG:"
+    echo "Dispositivos disponibles (excluyendo $l2arc_device):"
+    local slog_devices=()
+    for i in "${!available_devices[@]}"; do
+        local device_info="${available_devices[$i]}"
+        local device_name=$(echo "$device_info" | cut -d: -f1)
+        local usage_status=$(echo "$device_info" | cut -d: -f2)
+        
+        if [ "$device_name" != "$l2arc_device" ]; then
+            slog_devices+=("$device_info")
+            local size=$(lsblk -dpno SIZE "/dev/$device_name" | tr -d ' ')
+            local model=$(lsblk -dpno MODEL "/dev/$device_name" | tr -d ' ')
+            local recommendation=""
+            
+            if [[ "$device_name" == nvme* ]]; then
+                recommendation=" ⭐ RECOMENDADO"
+            elif lsblk -dpno ROTA "/dev/$device_name" | grep -q "0"; then
+                recommendation=" ✅ ADECUADO"
+            else
+                recommendation=" ⚠️  NO RECOMENDADO"
+            fi
+            
+            if [ "$usage_status" = "DISPONIBLE" ]; then
+                echo "  ${#slog_devices[@]}. $device_name - $size - $model$recommendation"
+            else
+                echo "  ${#slog_devices[@]}. $device_name - $size - $model$recommendation (EN USO: $usage_status)"
+            fi
+        fi
+    done
+    
+    while true; do
+        read -p "👉 Dispositivo para SLOG (1-${#slog_devices[@]}): " slog_choice
+        if [[ "$slog_choice" =~ ^[0-9]+$ ]] && [ "$slog_choice" -ge 1 ] && [ "$slog_choice" -le ${#slog_devices[@]} ]; then
+            local device_info="${slog_devices[$((slog_choice-1))]}"
+            local slog_device=$(echo "$device_info" | cut -d: -f1)
+            local slog_usage=$(echo "$device_info" | cut -d: -f2)
+            
+            # Verificar si el dispositivo SLOG está en uso
+            if [ "$slog_usage" != "DISPONIBLE" ]; then
+                echo ""
+                echo "⚠️  ADVERTENCIA CRÍTICA: El dispositivo $slog_device está EN USO"
+                echo "   📁 Uso actual: $slog_usage"
+                echo "   💀 Limpiar este dispositivo DESTRUIRÁ todos los datos"
+                echo "   🔧 SLOG es crítico para integridad de datos"
+                echo ""
+                if ! confirm "¿Continuar con $slog_device para SLOG?"; then
+                    echo "Selecciona otro dispositivo..."
+                    continue
+                fi
+            fi
+            break
+        else
+            echo "❌ Selección inválida. Usa números del 1 al ${#slog_devices[@]}."
+        fi
+    done
+    
+    # Verificar SLOG si es HDD
+    if ! [[ "$slog_device" == nvme* ]] && lsblk -dpno ROTA "/dev/$slog_device" | grep -q "1"; then
+        show_warning "⚠️  ADVERTENCIA: Dispositivo SLOG seleccionado es HDD"
+        if ! confirm "¿Continuar con HDD para SLOG? (no recomendado)"; then
+            show_message "Configuración cancelada"
+            return 0
+        fi
+    fi
+    
+    # Mostrar resumen y confirmar
+    echo ""
+    show_message "📊 RESUMEN DE CONFIGURACIÓN:"
+    echo "   Pool: $pool_name"
+    echo "   L2ARC: /dev/$l2arc_device (cache de lectura)"
+    echo "   SLOG: /dev/$slog_device (log de escritura)"
+    echo ""
+    
+    show_warning "⚠️  Esto limpiará completamente ambos dispositivos"
+    if confirm "¿Continuar con la configuración?"; then
+        # Configurar L2ARC
+        show_message "Preparando /dev/$l2arc_device para L2ARC..."
+        clean_disk "$l2arc_device"
+        
+        # Verificar compatibilidad de tamaño de sector para L2ARC
+        show_message "Verificando compatibilidad de sector para L2ARC..."
+        local pool_sector_size=$(zpool get ashift "$pool_name" -H -o value 2>/dev/null | head -n 1)
+        local l2arc_sector_size=$(sudo blockdev --getpbsz "/dev/$l2arc_device" 2>/dev/null)
+        local l2arc_force=""
+        
+        if [ -n "$pool_sector_size" ] && [ -n "$l2arc_sector_size" ]; then
+            local pool_bytes=$((2 ** pool_sector_size))
+            if [ "$l2arc_sector_size" -ne "$pool_bytes" ]; then
+                echo "   ⚠️  Pool: ${pool_bytes} bytes | L2ARC: ${l2arc_sector_size} bytes"
+                if confirm "¿Forzar L2ARC?"; then
+                    l2arc_force="-f"
+                else
+                    show_message "Configuración cancelada"
+                    return 1
+                fi
+            fi
+        fi
+        
+        show_message "Agregando L2ARC al pool..."
+        if ! sudo zpool add $l2arc_force "$pool_name" cache "/dev/$l2arc_device"; then
+            show_error "❌ Error configurando L2ARC"
+            return 1
+        fi
+        
+        # Configurar SLOG
+        show_message "Preparando /dev/$slog_device para SLOG..."
+        clean_disk "$slog_device"
+        
+        # Verificar compatibilidad de tamaño de sector para SLOG
+        show_message "Verificando compatibilidad de sector para SLOG..."
+        local slog_sector_size=$(sudo blockdev --getpbsz "/dev/$slog_device" 2>/dev/null)
+        local slog_force=""
+        
+        if [ -n "$pool_sector_size" ] && [ -n "$slog_sector_size" ]; then
+            local pool_bytes=$((2 ** pool_sector_size))
+            if [ "$slog_sector_size" -ne "$pool_bytes" ]; then
+                echo "   ⚠️  Pool: ${pool_bytes} bytes | SLOG: ${slog_sector_size} bytes"
+                if confirm "¿Forzar SLOG? (RIESGOSO para integridad)"; then
+                    slog_force="-f"
+                else
+                    show_message "Configuración cancelada"
+                    return 1
+                fi
+            fi
+        fi
+        
+        show_message "Agregando SLOG al pool..."
+        if ! sudo zpool add $slog_force "$pool_name" log "/dev/$slog_device"; then
+            show_error "❌ Error configurando SLOG"
+            return 1
+        fi
+        
+        show_message "✅ L2ARC y SLOG configurados exitosamente"
+        echo ""
+        show_message "📊 CONFIGURACIÓN COMPLETADA:"
+        echo "   Pool: $pool_name"
+        echo "   L2ARC: /dev/$l2arc_device (mejora lecturas frecuentes)"
+        echo "   SLOG: /dev/$slog_device (mejora escrituras síncronas)"
+        return 0
+    else
+        show_message "Configuración cancelada"
+        return 1
+    fi
+}
+
+# Función para configurar particiones L2ARC + SLOG en un dispositivo
+setup_partitioned_cache() {
+    local pool_name="$1"
+    shift
+    local available_devices=("$@")
+    
+    show_title "Configuración de L2ARC + SLOG Particionado para '$pool_name'"
+    echo ""
+    echo "💡 CONFIGURACIÓN PARTICIONADA:"
+    echo "   Esta opción crea particiones en un solo dispositivo:"
+    echo "   • 80% del espacio para L2ARC (cache de lectura)"
+    echo "   • 20% del espacio para SLOG (log de escritura)"
+    echo ""
+    echo "⚠️  RECOMENDACIONES:"
+    echo "   • Usar solo con SSD de alta calidad (preferiblemente NVMe)"
+    echo "   • El dispositivo debe tener al menos 8GB de espacio"
+    echo "   • No recomendado para HDD o dispositivos USB"
+    echo ""
+    
+    # Mostrar dispositivos recomendados
+    echo "💾 DISPOSITIVOS DISPONIBLES:"
+    for i in "${!available_devices[@]}"; do
+        local device_info="${available_devices[$i]}"
+        local device_name=$(echo "$device_info" | cut -d: -f1)
+        local usage_status=$(echo "$device_info" | cut -d: -f2)
+        local size=$(lsblk -dpno SIZE "/dev/$device_name" | tr -d ' ')
+        local size_bytes=$(lsblk -dpno SIZE "/dev/$device_name" --bytes)
+        local model=$(lsblk -dpno MODEL "/dev/$device_name" | tr -d ' ')
+        local recommendation=""
+        
+        if [[ "$device_name" == nvme* ]]; then
+            recommendation=" ⭐ EXCELENTE"
+        elif lsblk -dpno ROTA "/dev/$device_name" | grep -q "0"; then
+            if [ "$size_bytes" -gt 8589934592 ]; then  # 8GB
+                recommendation=" ✅ ADECUADO"
+            else
+                recommendation=" ⚠️  PEQUEÑO (mín 8GB recomendado)"
+            fi
+        else
+            recommendation=" ❌ NO RECOMENDADO (HDD)"
+        fi
+        
+        if [ "$usage_status" = "DISPONIBLE" ]; then
+            echo "  $((i+1)). $device_name - $size - $model$recommendation"
+        else
+            echo "  $((i+1)). $device_name - $size - $model$recommendation (EN USO: $usage_status)"
+        fi
+    done
+    
+    while true; do
+        read -p "👉 Selecciona dispositivo (1-${#available_devices[@]}): " device_choice
+        if [[ "$device_choice" =~ ^[0-9]+$ ]] && [ "$device_choice" -ge 1 ] && [ "$device_choice" -le ${#available_devices[@]} ]; then
+            local device_info="${available_devices[$((device_choice-1))]}"
+            local selected_device=$(echo "$device_info" | cut -d: -f1)
+            local usage_status=$(echo "$device_info" | cut -d: -f2)
+            
+            # Verificar si el dispositivo está en uso
+            if [ "$usage_status" != "DISPONIBLE" ]; then
+                echo ""
+                echo "⚠️  ADVERTENCIA: El dispositivo $selected_device está EN USO"
+                echo "   📁 Uso actual: $usage_status"
+                echo "   💀 Crear particiones DESTRUIRÁ todos los datos"
+                echo ""
+                if ! confirm "¿Estás SEGURO de que quieres limpiar y particionar $selected_device?"; then
+                    echo "Selecciona otro dispositivo..."
+                    continue
+                fi
+            fi
+            break
+        else
+            echo "❌ Selección inválida. Usa números del 1 al ${#available_devices[@]}."
+        fi
+    done
+    
+    # Verificar si el dispositivo es adecuado
+    local size_bytes=$(lsblk -dpno SIZE "/dev/$selected_device" --bytes)
+    if [ "$size_bytes" -lt 8589934592 ]; then  # 8GB
+        show_warning "⚠️  El dispositivo es menor a 8GB, puede no ser óptimo"
+        if ! confirm "¿Continuar de todas formas?"; then
+            show_message "Configuración cancelada"
+            return 0
+        fi
+    fi
+    
+    if ! [[ "$selected_device" == nvme* ]] && lsblk -dpno ROTA "/dev/$selected_device" | grep -q "1"; then
+        show_warning "⚠️  ADVERTENCIA: El dispositivo seleccionado es un HDD"
+        show_warning "   No es recomendado usar HDD para particionado L2ARC+SLOG"
+        if ! confirm "¿Estás seguro de continuar?"; then
+            show_message "Configuración cancelada"
+            return 0
+        fi
+    fi
+    
+    # Mostrar resumen
+    local size_gb=$(( size_bytes / 1024 / 1024 / 1024 ))
+    local l2arc_size=$(( size_gb * 80 / 100 ))
+    local slog_size=$(( size_gb * 20 / 100 ))
+    
+    echo ""
+    show_message "📊 CONFIGURACIÓN PLANIFICADA:"
+    echo "   Dispositivo: /dev/$selected_device ($size_gb GB)"
+    echo "   Partición L2ARC: ~${l2arc_size}GB (80%)"
+    echo "   Partición SLOG: ~${slog_size}GB (20%)"
+    echo ""
+    
+    show_warning "⚠️  Esto destruirá todos los datos en /dev/$selected_device"
+    if confirm "¿Continuar con el particionado?"; then
+        echo ""
+        show_message "🔍 VERIFICACIÓN PREVIA DEL POOL:"
+        echo "   Pool: $pool_name"
+        echo "   Estado: $(zpool get health "$pool_name" -H -o value 2>/dev/null || echo "DESCONOCIDO")"
+        echo "   Versión: $(zpool get version "$pool_name" -H -o value 2>/dev/null || echo "DESCONOCIDA")"
+        echo ""
+        
+        show_message "Preparando dispositivo /dev/$selected_device..."
+        
+        # Limpiar dispositivo
+        if ! clean_disk "$selected_device"; then
+            show_error "❌ Error limpiando el dispositivo"
+            show_message "Regresando al menú anterior..."
+            return 1
+        fi
+        
+        # Crear tabla de particiones GPT
+        show_message "Creando tabla de particiones..."
+        if ! sudo parted "/dev/$selected_device" --script mklabel gpt; then
+            show_error "❌ Error creando tabla de particiones"
+            show_message "Regresando al menú anterior..."
+            return 1
+        fi
+        
+        # Crear partición L2ARC (80%)
+        show_message "Creando partición L2ARC (80% del espacio)..."
+        if ! sudo parted "/dev/$selected_device" --script mkpart l2arc ext4 1MiB 80%; then
+            show_error "❌ Error creando partición L2ARC"
+            show_message "Regresando al menú anterior..."
+            return 1
+        fi
+        
+        # Crear partición SLOG (20%)
+        show_message "Creando partición SLOG (20% del espacio)..."
+        if ! sudo parted "/dev/$selected_device" --script mkpart slog ext4 80% 100%; then
+            show_error "❌ Error creando partición SLOG"
+            show_message "Regresando al menú anterior..."
+            return 1
+        fi
+        
+        # Esperar que el kernel reconozca las particiones
+        sudo partprobe "/dev/$selected_device"
+        sleep 3
+        
+        # Determinar nombres de particiones
+        local l2arc_partition="${selected_device}1"
+        local slog_partition="${selected_device}2"
+        
+        # Si es NVMe, las particiones tienen formato diferente
+        if [[ "$selected_device" == nvme* ]]; then
+            l2arc_partition="${selected_device}p1"
+            slog_partition="${selected_device}p2"
+        fi
+        
+        # Verificar que las particiones existen
+        if [ ! -b "/dev/$l2arc_partition" ] || [ ! -b "/dev/$slog_partition" ]; then
+            show_error "❌ Error: Las particiones no se crearon correctamente"
+            show_message "Regresando al menú anterior..."
+            return 1
+        fi
+        
+        # Agregar L2ARC y SLOG
+        echo ""
+        show_message "🔧 Agregando L2ARC y SLOG al pool en un solo comando..."
+        echo "   💡 Cache devices no requieren compatibilidad de ashift"
+        echo "   Comando: zpool add '$pool_name' cache '/dev/$l2arc_partition' log '/dev/$slog_partition'"
+        
+        # Verificar que ambas particiones existen y son accesibles
+        if [ ! -b "/dev/$l2arc_partition" ]; then
+            show_error "❌ Partición L2ARC /dev/$l2arc_partition no existe"
+            return 1
+        fi
+        
+        if [ -n "$pool_sector_size" ] && [ -n "$cache_sector_size" ]; then
+            local pool_bytes=$((2 ** pool_sector_size))
+            echo "   Pool sector size: ${pool_bytes} bytes (ashift=$pool_sector_size)"
+            echo "   Cache sector size: ${cache_sector_size} bytes"
+            
+            if [ "$cache_sector_size" -ne "$pool_bytes" ]; then
+                echo ""
+                show_error "⚠️  INCOMPATIBILIDAD DE TAMAÑO DE SECTOR:"
+                echo "   📊 Pool '$pool_name': ${pool_bytes} bytes"
+                echo "   💾 Cache device: ${cache_sector_size} bytes"
+                echo ""
+                show_message "[INFO] 🔍 CAUSA DEL PROBLEMA:"
+                echo "   El pool fue creado con ashift=$pool_sector_size"
+                if [ "$pool_sector_size" -eq 0 ]; then
+                    echo "   ⚠️  ashift=0 indica pool creado sin configuración óptima"
+                    echo "   💡 Para nuevos pools, el script ahora usa ashift automático"
+                    echo "   � Recomendación: Recrear pool con ashift=12 para compatibilidad"
+                fi
+                echo ""
+                echo "�💡 OPCIONES DISPONIBLES:"
+                echo "   1. Continuar SIN cache (recomendado)"
+                echo "   2. Forzar adición con -f (puede causar problemas)"
+                echo "   3. Usar un dispositivo con sector compatible"
+                echo "   4. Recrear pool con ashift correcto (óptimo a largo plazo)"
+                echo ""
+                
+                read -p "👉 Selecciona opción (1-3): " sector_choice
+                case $sector_choice in
+                    1)
+                        show_message "Configuración cancelada - pool funcionará sin cache"
+                        return 1
+                        ;;
+                    2)
+                        show_warning "⚠️  Usando -f para forzar la adición..."
+                        local force_flag="-f"
+                        ;;
+                    3)
+                        show_message "Configuración cancelada - selecciona otro dispositivo"
+                        return 1
+                        ;;
+                    *)
+                        show_message "Opción inválida - cancelando configuración"
+                        return 1
+                        ;;
+                esac
+            else
+                echo "   ✅ Tamaños de sector compatibles"
+                local force_flag=""
+            fi
+        else
+            echo "   ⚠️  No se pudo verificar tamaño de sector completamente"
+            echo "   Intentando adición normal..."
+            local force_flag=""
+        fi
+        
+        # Agregar L2ARC
+        echo ""
+        show_message "🔧 Agregando L2ARC y SLOG al pool en un solo comando..."
+        echo "   Comando: zpool add $force_flag '$pool_name' cache '/dev/$l2arc_partition' log '/dev/$slog_partition'"
+        
+        # Verificar que ambas particiones existen y son accesibles
+        if [ ! -b "/dev/$l2arc_partition" ]; then
+            show_error "❌ Partición L2ARC /dev/$l2arc_partition no existe"
+            return 1
+        fi
+        
+        if [ ! -b "/dev/$slog_partition" ]; then
+            show_error "❌ Partición SLOG /dev/$slog_partition no existe"
+            return 1
+        fi
+        
+        # Mostrar información de ambas particiones antes de agregar
+        echo "   Partición L2ARC: $(lsblk -no SIZE,FSTYPE "/dev/$l2arc_partition" 2>/dev/null || echo "sin formato")"
+        echo "   Partición SLOG: $(lsblk -no SIZE,FSTYPE "/dev/$slog_partition" 2>/dev/null || echo "sin formato")"
+        
+        if sudo zpool add "$pool_name" cache "/dev/$l2arc_partition" log "/dev/$slog_partition" 2>&1; then
+            show_message "✅ L2ARC y SLOG agregados exitosamente en un solo comando"
+            echo ""
+            show_message "📊 CONFIGURACIÓN COMPLETADA:"
+            echo "   Pool: $pool_name"
+            echo "   Dispositivo base: /dev/$selected_device"
+            echo "   L2ARC: /dev/$l2arc_partition (~${l2arc_size}GB)"
+            echo "   SLOG: /dev/$slog_partition (~${slog_size}GB)"
+            echo "   Función: Cache de lectura + Log de escritura optimizados"
+            echo "   💡 Ambos dispositivos agregados en comando único"
+            return 0
+        else
+            local exit_code=$?
+            show_error "❌ Error agregando L2ARC y SLOG (código: $exit_code)"
+            echo ""
+            echo "� INFORMACIÓN DE DIAGNÓSTICO:"
+            echo "   • Pool status:"
+            zpool status "$pool_name" | head -n 10
+            echo "   • Dispositivo L2ARC:"
+            lsblk "/dev/$l2arc_partition" 2>/dev/null || echo "     No se puede leer la partición"
+            echo "   • Dispositivo SLOG:"
+            lsblk "/dev/$slog_partition" 2>/dev/null || echo "     No se puede leer la partición"
+            echo "   • Posibles causas:"
+            echo "     - Partición ya en uso"
+            echo "     - Permisos insuficientes"
+            echo "     - Pool en estado degradado"
+            echo "   💡 Cache devices no requieren compatibilidad de ashift"
+            show_message "Regresando al menú anterior..."
+            return 1
+        fi
+    else
+        show_message "Configuración cancelada"
+        return 1
+    fi
+}
+
+# Función para crear snapshots iniciales
+create_initial_snapshots() {
+        
+        if sudo zpool add $force_flag "$pool_name" log "/dev/$slog_partition" 2>&1; then
+            show_message "✅ SLOG agregado exitosamente"
+        else
+            local exit_code=$?
+            show_error "❌ Error agregando SLOG (código: $exit_code)"
+            echo ""
+            echo "� INFORMACIÓN DE DIAGNÓSTICO:"
+            echo "   • Pool status:"
+            zpool status "$pool_name" | head -n 10
+            echo "   • Dispositivo SLOG:"
+            lsblk "/dev/$slog_partition" 2>/dev/null || echo "     No se puede leer la partición"
+            echo "   • Posibles causas:"
+            echo "     - Sector size incompatible"
+            echo "     - Partición ya en uso"
+            echo "     - Permisos insuficientes"
+            echo "     - Pool en estado degradado"
+            show_message "Regresando al menú anterior..."
+            return 1
+        fi
+}
+
+# Función para crear snapshots iniciales
+create_initial_snapshots() {
+    local pool_name="$1"
+    
+    show_title "Creación de Snapshots Iniciales"
+    echo ""
+    echo "💡 Los snapshots son copias instantáneas de datasets que no ocupan espacio inicial."
+    echo "   Son útiles para:"
+    echo "   • Backups rápidos antes de cambios importantes"
+    echo "   • Restauración rápida a estados anteriores"
+    echo "   • Bases para replicación de datos"
+    echo ""
+    
+    # Obtener datasets del pool
+    local datasets=$(zfs list -H -o name -r "$pool_name" 2>/dev/null)
+    
+    if [ -n "$datasets" ]; then
+        echo "📁 Datasets disponibles para snapshot:"
+        for dataset in $datasets; do
+            echo "  • $dataset"
+        done
+        echo ""
+        
+        if confirm "¿Crear snapshot inicial de todos los datasets?"; then
+            local timestamp=$(date +"%Y%m%d-%H%M%S")
+            local snapshot_name="inicial-$timestamp"
+            
+            for dataset in $datasets; do
+                show_message "Creando snapshot: $dataset@$snapshot_name"
+                if sudo zfs snapshot "$dataset@$snapshot_name"; then
+                    show_message "✅ Snapshot creado: $dataset@$snapshot_name"
+                else
+                    show_error "❌ Error creando snapshot de $dataset"
+                fi
+            done
+            
+            echo ""
+            show_message "📊 Snapshots creados:"
+            sudo zfs list -t snapshot -o name,used,creation | grep "@$snapshot_name"
+        fi
+    else
+        show_warning "No se encontraron datasets en el pool '$pool_name'"
+    fi
+}
+
+# Función para mostrar estado completo del pool
+show_pool_status() {
+    local pool_name="$1"
+    
+    # Debugging para identificar el problema
+    if [ -z "$pool_name" ]; then
+        show_error "Error crítico: show_pool_status llamado sin parámetro de pool_name"
+        echo "Información de debug:"
+        echo "  Parámetros recibidos: '$@'"
+        echo "  Número de parámetros: $#"
+        echo "  Variable global POOL_NAME: '$POOL_NAME'"
+        echo "  Pools disponibles: $(zpool list -H -o name 2>/dev/null | tr '\n' ' ')"
+        read -p "Presiona Enter para continuar..."
+        return 1
+    fi
+    
+    show_title "Estado Completo del Pool '$pool_name'"
+    echo ""
+    
+    # Estado del pool
+    echo "🏊 ESTADO DEL POOL:"
+    sudo zpool status "$pool_name"
+    echo ""
+    
+    # Información del pool
+    echo "📊 INFORMACIÓN DEL POOL:"
+    sudo zpool list "$pool_name"
+    echo ""
+    
+    # Datasets
+    echo "📁 DATASETS:"
+    sudo zfs list -r "$pool_name"
+    echo ""
+    
+    # Snapshots (si existen)
+    local snapshots=$(zfs list -t snapshot -H -o name 2>/dev/null | grep "^$pool_name")
+    if [ -n "$snapshots" ]; then
+        echo "📸 SNAPSHOTS:"
+        sudo zfs list -t snapshot -r "$pool_name"
+        echo ""
+    fi
+    
+    # Propiedades del pool
+    echo "⚙️  PROPIEDADES PRINCIPALES:"
+    echo "ARC Max: $(cat /sys/module/zfs/parameters/zfs_arc_max 2>/dev/null || echo 'No configurado')"
+    sudo zpool get all "$pool_name" | grep -E "ashift|feature|autoreplace|failmode"
+}
+
+# Ejecutar función principal
+main "$@"
