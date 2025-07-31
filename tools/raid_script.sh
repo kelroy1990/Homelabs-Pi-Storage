@@ -1,18 +1,397 @@
 #!/bin/bash
 
-# Script para configurar sistemas RAID en Raspberry Pi
-# Soporta BTRFS y ZFS
+# RAID Configuration Script for Raspberry Pi / Script de Configuración RAID para Raspberry Pi
+# Supports BTRFS and ZFS / Soporta BTRFS y ZFS
 
 set -e
 
-# Colores para output
+# Colors for output / Colores para output
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 BLUE='\033[0;34m'
 NC='\033[0m' # No Color
 
-# Función para mostrar mensajes
+# Global variable for language selection
+SCRIPT_LANGUAGE="en"
+
+# Language selection function / Función de selección de idioma
+select_language() {
+    clear
+    echo "╔════════════════════════════════════════════════════════════════╗"
+    echo "║                    RAID Configuration Script                   ║"
+    echo "║                   Script de Configuración RAID                ║"
+    echo "╚════════════════════════════════════════════════════════════════╝"
+    echo ""
+    echo "Please select your preferred language / Por favor selecciona tu idioma preferido:"
+    echo ""
+    echo "  1. English"
+    echo "  2. Español"
+    echo ""
+    
+    while true; do
+        read -p "Language choice / Elección de idioma (1-2): " lang_choice
+        case $lang_choice in
+            1)
+                SCRIPT_LANGUAGE="en"
+                echo "Language set to English"
+                break
+                ;;
+            2)
+                SCRIPT_LANGUAGE="es"
+                echo "Idioma establecido en Español"
+                break
+                ;;
+            *)
+                echo "Invalid option. Please select 1 or 2 / Opción inválida. Selecciona 1 o 2"
+                ;;
+        esac
+    done
+    echo ""
+    sleep 1
+}
+
+# Multilingual text messages / Mensajes de texto multiidioma
+get_text() {
+    local key="$1"
+    
+    case "$key" in
+        "script_title")
+            if [ "$SCRIPT_LANGUAGE" = "en" ]; then
+                echo "RAID Configuration Script for Raspberry Pi"
+            else
+                echo "Script de Configuración RAID para Raspberry Pi"
+            fi
+            ;;
+        "root_warning")
+            if [ "$SCRIPT_LANGUAGE" = "en" ]; then
+                echo "Do not run this script as root. Use sudo when necessary."
+            else
+                echo "No ejecutes este script como root. Usa sudo cuando sea necesario."
+            fi
+            ;;
+        "checking_requirements")
+            if [ "$SCRIPT_LANGUAGE" = "en" ]; then
+                echo "Checking System Requirements"
+            else
+                echo "Verificando Requisitos del Sistema"
+            fi
+            ;;
+        "updating_packages")
+            if [ "$SCRIPT_LANGUAGE" = "en" ]; then
+                echo "Updating package list..."
+            else
+                echo "Actualizando lista de paquetes..."
+            fi
+            ;;
+        "btrfs_available")
+            if [ "$SCRIPT_LANGUAGE" = "en" ]; then
+                echo "✓ BTRFS: Available"
+            else
+                echo "✓ BTRFS: Disponible"
+            fi
+            ;;
+        "btrfs_not_available")
+            if [ "$SCRIPT_LANGUAGE" = "en" ]; then
+                echo "✗ BTRFS: Not available"
+            else
+                echo "✗ BTRFS: No disponible"
+            fi
+            ;;
+        "zfs_available")
+            if [ "$SCRIPT_LANGUAGE" = "en" ]; then
+                echo "✓ ZFS: Available"
+            else
+                echo "✓ ZFS: Disponible"
+            fi
+            ;;
+        "zfs_not_available")
+            if [ "$SCRIPT_LANGUAGE" = "en" ]; then
+                echo "✗ ZFS: Not available"
+            else
+                echo "✗ ZFS: No disponible"
+            fi
+            ;;
+        "no_raid_tools")
+            if [ "$SCRIPT_LANGUAGE" = "en" ]; then
+                echo "No RAID tools available in the system"
+            else
+                echo "No hay herramientas RAID disponibles en el sistema"
+            fi
+            ;;
+        "will_install_packages")
+            if [ "$SCRIPT_LANGUAGE" = "en" ]; then
+                echo "Required packages will be installed..."
+            else
+                echo "Se instalarán los paquetes necesarios..."
+            fi
+            ;;
+        "packages_to_install")
+            if [ "$SCRIPT_LANGUAGE" = "en" ]; then
+                echo "Packages to be installed:"
+            else
+                echo "Paquetes que se instalarán:"
+            fi
+            ;;
+        "zfs_install_warning")
+            if [ "$SCRIPT_LANGUAGE" = "en" ]; then
+                echo "⚠️  ZFS may take up to 10 minutes to install due to kernel module compilation"
+            else
+                echo "⚠️  ZFS puede tardar hasta 10 minutos en instalarse debido a la compilación de módulos del kernel"
+            fi
+            ;;
+        "installation_progress_shown")
+            if [ "$SCRIPT_LANGUAGE" = "en" ]; then
+                echo "⚠️  You will see the installation progress on screen"
+            else
+                echo "⚠️  Durante la instalación verás el progreso en pantalla"
+            fi
+            ;;
+        "continue_installation")
+            if [ "$SCRIPT_LANGUAGE" = "en" ]; then
+                echo "Do you want to continue with the installation?"
+            else
+                echo "¿Deseas continuar con la instalación?"
+            fi
+            ;;
+        "installation_cancelled")
+            if [ "$SCRIPT_LANGUAGE" = "en" ]; then
+                echo "Installation cancelled by user"
+            else
+                echo "Instalación cancelada por el usuario"
+            fi
+            ;;
+        "starting_installation")
+            if [ "$SCRIPT_LANGUAGE" = "en" ]; then
+                echo "Starting package installation..."
+            else
+                echo "Iniciando instalación de paquetes..."
+            fi
+            ;;
+        "installing_zfs")
+            if [ "$SCRIPT_LANGUAGE" = "en" ]; then
+                echo "🔄 Installing ZFS (this may take several minutes)..."
+            else
+                echo "🔄 Instalando ZFS (esto puede tomar varios minutos)..."
+            fi
+            ;;
+        "zfs_progress")
+            if [ "$SCRIPT_LANGUAGE" = "en" ]; then
+                echo "📦 ZFS Installation Progress:"
+            else
+                echo "📦 Progreso de instalación ZFS:"
+            fi
+            ;;
+        "zfs_installed_successfully")
+            if [ "$SCRIPT_LANGUAGE" = "en" ]; then
+                echo "✅ ZFS installed successfully"
+            else
+                echo "✅ ZFS instalado exitosamente"
+            fi
+            ;;
+        "error_installing_zfs")
+            if [ "$SCRIPT_LANGUAGE" = "en" ]; then
+                echo "❌ Error installing ZFS"
+            else
+                echo "❌ Error instalando ZFS"
+            fi
+            ;;
+        "please_respond_yn")
+            if [ "$SCRIPT_LANGUAGE" = "en" ]; then
+                echo "Please answer y or n."
+            else
+                echo "Por favor responde y o n."
+            fi
+            ;;
+        "installation_cancelled")
+            if [ "$SCRIPT_LANGUAGE" = "en" ]; then
+                echo "Installation cancelled by user"
+            else
+                echo "Instalación cancelada por el usuario"
+            fi
+            ;;
+        "raid_completed")
+            if [ "$SCRIPT_LANGUAGE" = "en" ]; then
+                echo "RAID configuration completed successfully!"
+            else
+                echo "¡Configuración RAID completada exitosamente!"
+            fi
+            ;;
+        "raid_mounted_at")
+            if [ "$SCRIPT_LANGUAGE" = "en" ]; then
+                echo "RAID is mounted at:"
+            else
+                echo "El RAID está montado en:"
+            fi
+            ;;
+        "detect_existing_raid")
+            if [ "$SCRIPT_LANGUAGE" = "en" ]; then
+                echo "Detecting Existing RAID Configurations"
+            else
+                echo "Detección de Configuraciones RAID Existentes"
+            fi
+            ;;
+        "available_options")
+            if [ "$SCRIPT_LANGUAGE" = "en" ]; then
+                echo "🛠️  AVAILABLE OPTIONS:"
+            else
+                echo "🛠️  OPCIONES DISPONIBLES:"
+            fi
+            ;;
+        "continue_new_raid")
+            if [ "$SCRIPT_LANGUAGE" = "en" ]; then
+                echo "Continue with new RAID configuration"
+            else
+                echo "Continuar con configuración de nuevo RAID"
+            fi
+            ;;
+        "exit_script")
+            if [ "$SCRIPT_LANGUAGE" = "en" ]; then
+                echo "Exit script"
+            else
+                echo "Salir del script"
+            fi
+            ;;
+        "no_raid_detected")
+            if [ "$SCRIPT_LANGUAGE" = "en" ]; then
+                echo "ℹ️  No existing RAID configurations detected."
+            else
+                echo "ℹ️  No se detectaron configuraciones RAID existentes."
+            fi
+            ;;
+        "system_ready_new_raid")
+            if [ "$SCRIPT_LANGUAGE" = "en" ]; then
+                echo "   System is ready to configure a new RAID."
+            else
+                echo "   El sistema está listo para configurar un nuevo RAID."
+            fi
+            ;;
+        "manage_zfs_pools")
+            if [ "$SCRIPT_LANGUAGE" = "en" ]; then
+                echo "Manage ZFS pools and datasets"
+            else
+                echo "Gestionar pools y datasets ZFS"
+            fi
+            ;;
+        "delete_zfs_pools")
+            if [ "$SCRIPT_LANGUAGE" = "en" ]; then
+                echo "Delete specific ZFS pools"
+            else
+                echo "Eliminar pools ZFS específicos"
+            fi
+            ;;
+        "delete_btrfs_filesystems")
+            if [ "$SCRIPT_LANGUAGE" = "en" ]; then
+                echo "Delete specific BTRFS filesystems"
+            else
+                echo "Eliminar filesystems BTRFS específicos"
+            fi
+            ;;
+        "manage_mdadm_arrays")
+            if [ "$SCRIPT_LANGUAGE" = "en" ]; then
+                echo "Manage MDADM arrays (information only)"
+            else
+                echo "Gestionar arrays MDADM (información solamente)"
+            fi
+            ;;
+        "manage_lvm_groups")
+            if [ "$SCRIPT_LANGUAGE" = "en" ]; then
+                echo "Manage LVM Volume Groups (information only)"
+            else
+                echo "Gestionar Volume Groups LVM (información solamente)"
+            fi
+            ;;
+        "continue_new_raid")
+            if [ "$SCRIPT_LANGUAGE" = "en" ]; then
+                echo "Continue with new RAID configuration"
+            else
+                echo "Continuar con configuración de nuevo RAID"
+            fi
+            ;;
+        "exit_script")
+            if [ "$SCRIPT_LANGUAGE" = "en" ]; then
+                echo "Exit script"
+            else
+                echo "Salir del script"
+            fi
+            ;;
+        "invalid_option")
+            if [ "$SCRIPT_LANGUAGE" = "en" ]; then
+                echo "❌ Invalid option. Please select a valid number."
+            else
+                echo "❌ Opción inválida. Selecciona un número válido."
+            fi
+            ;;
+        "select_option")
+            if [ "$SCRIPT_LANGUAGE" = "en" ]; then
+                echo "👉 Select an option"
+            else
+                echo "👉 Selecciona una opción"
+            fi
+            ;;
+        "continuing_new_raid")
+            if [ "$SCRIPT_LANGUAGE" = "en" ]; then
+                echo "Continuing with new RAID configuration..."
+            else
+                echo "Continuando con configuración de nuevo RAID..."
+            fi
+            ;;
+        "exiting_script")
+            if [ "$SCRIPT_LANGUAGE" = "en" ]; then
+                echo "Exiting script..."
+            else
+                echo "Saliendo del script..."
+            fi
+            ;;
+        "manage_mdadm_arrays")
+            if [ "$SCRIPT_LANGUAGE" = "es" ]; then
+                echo "Gestionar arrays MDADM (información solamente)"
+            else
+                echo "Manage MDADM arrays (information only)"
+            fi
+            ;;
+        "manage_lvm_groups")
+            if [ "$SCRIPT_LANGUAGE" = "es" ]; then
+                echo "Gestionar Volume Groups LVM (información solamente)"
+            else
+                echo "Manage LVM Volume Groups (information only)"
+            fi
+            ;;
+        "delete_btrfs_filesystems")
+            if [ "$SCRIPT_LANGUAGE" = "es" ]; then
+                echo "Eliminar filesystems BTRFS específicos"
+            else
+                echo "Delete specific BTRFS filesystems"
+            fi
+            ;;
+        "mdadm_management_info")
+            if [ "$SCRIPT_LANGUAGE" = "es" ]; then
+                echo "Para gestionar arrays MDADM, usa herramientas específicas como:"
+            else
+                echo "To manage MDADM arrays, use specific tools like:"
+            fi
+            ;;
+        "lvm_management_info")
+            if [ "$SCRIPT_LANGUAGE" = "es" ]; then
+                echo "Para gestionar LVM, usa herramientas específicas como:"
+            else
+                echo "To manage LVM, use specific tools like:"
+            fi
+            ;;
+        "continue_detection")
+            if [ "$SCRIPT_LANGUAGE" = "es" ]; then
+                echo "¿Continuar con la detección de configuraciones?"
+            else
+                echo "Continue with configuration detection?"
+            fi
+            ;;
+        *)
+            echo "$key" # Fallback to key itself
+            ;;
+    esac
+}
+
+# Functions for displaying messages / Funciones para mostrar mensajes
 show_message() {
     echo -e "${GREEN}[INFO]${NC} $1"
 }
@@ -29,30 +408,39 @@ show_title() {
     echo -e "${BLUE}=== $1 ===${NC}"
 }
 
-# Función para obtener confirmación del usuario
+# Function to get user confirmation / Función para obtener confirmación del usuario
 confirm() {
+    local prompt="$1"
+    local yn_text
+    
+    if [ "$SCRIPT_LANGUAGE" = "en" ]; then
+        yn_text="(y/n)"
+    else
+        yn_text="(s/n)"
+    fi
+    
     while true; do
-        read -p "$1 (y/n): " yn
+        read -p "$prompt $yn_text: " yn
         case $yn in
-            [Yy]* ) return 0;;
+            [YySs]* ) return 0;;
             [Nn]* ) return 1;;
-            * ) echo "Por favor responde y o n.";;
+            * ) echo "$(get_text "please_respond_yn")";;
         esac
     done
 }
 
-# Función para verificar e instalar requisitos del sistema
+# Function to check and install system requirements / Función para verificar e instalar requisitos del sistema
 check_and_install_requirements() {
-    show_title "Verificando Requisitos del Sistema"
+    show_title "$(get_text "checking_requirements")"
     
-    # Actualizar lista de paquetes
-    show_message "Actualizando lista de paquetes..."
+    # Update package list / Actualizar lista de paquetes
+    show_message "$(get_text "updating_packages")"
     sudo apt update > /dev/null 2>&1
     
     local packages_to_install=()
     local missing_packages=""
     
-    # Verificar herramientas básicas
+    # Check basic tools / Verificar herramientas básicas
     if ! command -v lsblk &> /dev/null; then
         packages_to_install+=("util-linux")
         missing_packages="$missing_packages util-linux"
@@ -68,45 +456,45 @@ check_and_install_requirements() {
         missing_packages="$missing_packages util-linux"
     fi
     
-    # Verificar BTRFS
+    # Check BTRFS / Verificar BTRFS
     local btrfs_available=false
     if command -v mkfs.btrfs &> /dev/null && command -v btrfs &> /dev/null; then
         btrfs_available=true
-        show_message "✓ BTRFS: Disponible"
+        show_message "$(get_text "btrfs_available")"
     else
-        show_warning "✗ BTRFS: No disponible"
+        show_warning "$(get_text "btrfs_not_available")"
         packages_to_install+=("btrfs-progs")
         missing_packages="$missing_packages btrfs-progs"
     fi
     
-    # Verificar ZFS
+    # Check ZFS / Verificar ZFS
     local zfs_available=false
     if command -v zpool &> /dev/null && command -v zfs &> /dev/null; then
         zfs_available=true
-        show_message "✓ ZFS: Disponible"
+        show_message "$(get_text "zfs_available")"
     else
-        show_warning "✗ ZFS: No disponible"
+        show_warning "$(get_text "zfs_not_available")"
         packages_to_install+=("zfsutils-linux")
         missing_packages="$missing_packages zfsutils-linux"
     fi
     
-    # Verificar mdadm (útil para limpieza)
+    # Check mdadm (useful for cleanup) / Verificar mdadm (útil para limpieza)
     if ! command -v mdadm &> /dev/null; then
         packages_to_install+=("mdadm")
         missing_packages="$missing_packages mdadm"
     fi
     
-    # Si no hay herramientas RAID disponibles, no podemos continuar
+    # If no RAID tools available, we cannot continue / Si no hay herramientas RAID disponibles, no podemos continuar
     if [ "$btrfs_available" = false ] && [ "$zfs_available" = false ]; then
-        show_error "No hay herramientas RAID disponibles en el sistema"
-        show_message "Se instalarán los paquetes necesarios..."
+        show_error "$(get_text "no_raid_tools")"
+        show_message "$(get_text "will_install_packages")"
     fi
     
-    # Instalar paquetes faltantes si es necesario
+    # Install missing packages if necessary / Instalar paquetes faltantes si es necesario
     if [ ${#packages_to_install[@]} -gt 0 ]; then
-        show_message "Paquetes que se instalarán:$missing_packages"
+        show_message "$(get_text "packages_to_install")$missing_packages"
         
-        # Verificar si ZFS está en la lista
+        # Check if ZFS is in the list / Verificar si ZFS está en la lista
         local installing_zfs=false
         for package in "${packages_to_install[@]}"; do
             if [ "$package" = "zfsutils-linux" ]; then
@@ -116,27 +504,27 @@ check_and_install_requirements() {
         done
         
         if [ "$installing_zfs" = true ]; then
-            show_warning "⚠️  ZFS puede tardar hasta 10 minutos en instalarse debido a la compilación de módulos del kernel"
-            show_warning "⚠️  Durante la instalación verás el progreso en pantalla"
+            show_warning "$(get_text "zfs_install_warning")"
+            show_warning "$(get_text "installation_progress_shown")"
             
-            if ! confirm "¿Deseas continuar con la instalación?"; then
-                show_message "Instalación cancelada por el usuario"
+            if ! confirm "$(get_text "continue_installation")"; then
+                show_message "$(get_text "installation_cancelled")"
                 exit 0
             fi
         fi
         
-        show_message "Iniciando instalación de paquetes..."
+        show_message "$(get_text "starting_installation")"
         echo "----------------------------------------"
         
-        # Instalar paquetes con output visible
+        # Install packages with visible output / Instalar paquetes con output visible
         for package in "${packages_to_install[@]}"; do
             if [ "$package" = "zfsutils-linux" ]; then
-                show_message "🔄 Instalando ZFS (esto puede tomar varios minutos)..."
-                echo "📦 Progreso de instalación ZFS:"
+                show_message "$(get_text "installing_zfs")"
+                echo "$(get_text "zfs_progress")"
                 if sudo apt install -y "$package"; then
-                    show_message "✅ ZFS instalado exitosamente"
+                    show_message "$(get_text "zfs_installed_successfully")"
                 else
-                    show_error "❌ Error instalando ZFS"
+                    show_error "$(get_text "error_installing_zfs")"
                     exit 1
                 fi
             else
@@ -200,9 +588,9 @@ check_and_install_requirements() {
     echo ""
 }
 
-# Función para detectar todas las configuraciones RAID existentes
+# Function to detect all existing RAID configurations / Función para detectar todas las configuraciones RAID existentes
 detect_existing_raid_configurations() {
-    show_title "Detección de Configuraciones RAID Existentes"
+    show_title "$(get_text "detect_existing_raid")"
     
     local zfs_found=false
     local btrfs_found=false
@@ -381,52 +769,52 @@ detect_existing_raid_configurations() {
         fi
     fi
     
-    # MOSTRAR RESUMEN Y OPCIONES
+    # SHOW SUMMARY AND OPTIONS / MOSTRAR RESUMEN Y OPCIONES
     if [ "$any_raid_found" = true ]; then
         echo "═══════════════════════════════════════════════════════════════════"
         echo ""
-        echo "🛠️  OPCIONES DISPONIBLES:"
+        echo "$(get_text "available_options")"
         
         local option_number=1
         
         if [ "$zfs_found" = true ]; then
-            echo "   $option_number. Gestionar pools y datasets ZFS"
+            echo "   $option_number. $(get_text "manage_zfs_pools")"
             zfs_option=$option_number
             ((option_number++))
             
-            echo "   $option_number. Eliminar pools ZFS específicos"
+            echo "   $option_number. $(get_text "delete_zfs_pools")"
             zfs_delete_option=$option_number
             ((option_number++))
         fi
         
         if [ "$btrfs_found" = true ]; then
-            echo "   $option_number. Eliminar filesystems BTRFS específicos"
+            echo "   $option_number. $(get_text "delete_btrfs_filesystems")"
             btrfs_option=$option_number
             ((option_number++))
         fi
         
         if [ "$mdadm_found" = true ]; then
-            echo "   $option_number. Gestionar arrays MDADM (información solamente)"
+            echo "   $option_number. $(get_text "manage_mdadm_arrays")"
             mdadm_option=$option_number
             ((option_number++))
         fi
         
         if [ "$lvm_found" = true ]; then
-            echo "   $option_number. Gestionar Volume Groups LVM (información solamente)"
+            echo "   $option_number. $(get_text "manage_lvm_groups")"
             lvm_option=$option_number
             ((option_number++))
         fi
         
-        echo "   $option_number. Continuar con configuración de nuevo RAID"
+        echo "   $option_number. $(get_text "continuing_new_raid")"
         continue_option=$option_number
         ((option_number++))
         
-        echo "   $option_number. Salir del script"
+        echo "   $option_number. $(get_text "exiting_script")"
         exit_option=$option_number
         echo ""
         
         while true; do
-            read -p "👉 Selecciona una opción (1-$exit_option): " choice
+            read -p "👉 $(get_text "select_option") (1-$exit_option): " choice
             
             if [ "$zfs_found" = true ] && [ "$choice" = "$zfs_option" ]; then
                 manage_existing_pools_datasets
@@ -445,12 +833,12 @@ detect_existing_raid_configurations() {
             elif [ "$mdadm_found" = true ] && [ "$choice" = "$mdadm_option" ]; then
                 show_mdadm_details
                 echo ""
-                echo "Para gestionar arrays MDADM, usa herramientas específicas como:"
+                echo "$(get_text "mdadm_management_info")"
                 echo "  • mdadm --detail /dev/mdX"
                 echo "  • mdadm --stop /dev/mdX"
                 echo "  • mdadm --manage /dev/mdX --fail /dev/sdX"
                 echo ""
-                if confirm "¿Continuar con la detección de configuraciones?"; then
+                if confirm "$(get_text "continue_detection")"; then
                     detect_existing_raid_configurations
                     return $?
                 else
@@ -459,33 +847,33 @@ detect_existing_raid_configurations() {
             elif [ "$lvm_found" = true ] && [ "$choice" = "$lvm_option" ]; then
                 show_lvm_details
                 echo ""
-                echo "Para gestionar LVM, usa herramientas específicas como:"
+                echo "$(get_text "lvm_management_info")"
                 echo "  • lvdisplay, vgdisplay, pvdisplay"
                 echo "  • lvextend, lvreduce"
                 echo "  • vgextend, vgreduce"
                 echo ""
-                if confirm "¿Continuar con la detección de configuraciones?"; then
+                if confirm "$(get_text "continue_detection")"; then
                     detect_existing_raid_configurations
                     return $?
                 else
                     return 1
                 fi
             elif [ "$choice" = "$continue_option" ]; then
-                show_message "Continuando con configuración de nuevo RAID..."
+                show_message "$(get_text "continuing_new_raid")..."
                 return 0  # Continúa con el flujo normal
             elif [ "$choice" = "$exit_option" ]; then
-                show_message "Saliendo del script..."
+                show_message "$(get_text "exiting_script")..."
                 exit 0
             else
-                echo "❌ Opción inválida. Selecciona un número válido."
+                echo "❌ $(get_text "invalid_option")."
             fi
         done
     else
         echo ""
-        echo "ℹ️  No se detectaron configuraciones RAID existentes."
-        echo "   El sistema está listo para configurar un nuevo RAID."
+        echo "$(get_text "no_raid_detected")"
+        echo "$(get_text "system_ready_new_raid")"
         echo ""
-        return 0  # Continúa con configuración normal
+        return 0  # Continue with normal configuration / Continúa con configuración normal
     fi
 }
 
@@ -2923,20 +3311,24 @@ setup_auto_mount() {
 
 # Función principal
 main() {
-    show_title "Script de Configuración RAID para Raspberry Pi"
+    # Select language first / Seleccionar idioma primero
+    select_language
     
-    # Verificar si se ejecuta como root o con sudo
+    show_title "$(get_text "script_title")"
+    
+    # Check if running as root or with sudo / Verificar si se ejecuta como root o con sudo
     if [ "$EUID" -eq 0 ]; then
-        show_error "No ejecutes este script como root. Usa sudo cuando sea necesario."
+        show_error "$(get_text "root_warning")"
         exit 1
     fi
     
-    # Verificar e instalar requisitos
+    # Check and install requirements / Verificar e instalar requisitos
     check_and_install_requirements
     
+    # Detect existing RAID configurations (ZFS, BTRFS, MDADM, LVM)
     # Detectar configuraciones RAID existentes (ZFS, BTRFS, MDADM, LVM)
     if detect_existing_raid_configurations; then
-        # Continúa con configuración normal
+        # Continue with normal configuration / Continúa con configuración normal
         detect_disks
         select_filesystem
         
@@ -2949,12 +3341,15 @@ main() {
         show_summary
         setup_auto_mount
         
-        show_message "¡Configuración RAID completada exitosamente!"
-        show_message "El RAID está montado en: $MOUNT_POINT"
+        show_message "$(get_text "raid_completed")"
+        show_message "$(get_text "raid_mounted_at") $MOUNT_POINT"
         
+        # Offer dataset management after creating the pool
         # Ofrecer gestión de datasets después de crear el pool
         offer_post_creation_dataset_management
     fi
+    # If detected existing RAID configurations and user chose to manage them,
+    # the detect_existing_raid_configurations function already handled everything
     # Si detectó configuraciones RAID existentes y el usuario eligió gestionarlas, 
     # la función detect_existing_raid_configurations ya manejó todo
 }
