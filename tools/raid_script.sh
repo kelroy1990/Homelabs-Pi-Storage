@@ -14,6 +14,7 @@ NC='\033[0m' # No Color
 
 # Global variable for language selection
 SCRIPT_LANGUAGE="en"
+export SCRIPT_LANGUAGE
 
 # Language selection function / Función de selección de idioma
 select_language() {
@@ -34,11 +35,13 @@ select_language() {
         case $lang_choice in
             1)
                 SCRIPT_LANGUAGE="en"
+                export SCRIPT_LANGUAGE
                 echo "Language set to English"
                 break
                 ;;
             2)
                 SCRIPT_LANGUAGE="es"
+                export SCRIPT_LANGUAGE
                 echo "Idioma establecido en Español"
                 break
                 ;;
@@ -116,7 +119,11 @@ get_text() {
             if [ "$SCRIPT_LANGUAGE" = "en" ]; then
                 echo "No RAID tools available in the system"
             else
-                echo "No hay herramientas RAID disponibles en el sistema"
+                if [ "$SCRIPT_LANGUAGE" = "en" ]; then
+                    echo "No RAID tools available on the system"
+                else
+                    echo "No hay herramientas RAID disponibles en el sistema"
+                fi
             fi
             ;;
         "will_install_packages")
@@ -151,7 +158,11 @@ get_text() {
             if [ "$SCRIPT_LANGUAGE" = "en" ]; then
                 echo "Do you want to continue with the installation?"
             else
-                echo "¿Deseas continuar con la instalación?"
+                if [ "$SCRIPT_LANGUAGE" = "en" ]; then
+                    echo "Do you want to continue with the installation?"
+                else
+                    echo "¿Deseas continuar con la instalación?"
+                fi
             fi
             ;;
         "installation_cancelled")
@@ -214,7 +225,11 @@ get_text() {
             if [ "$SCRIPT_LANGUAGE" = "en" ]; then
                 echo "RAID configuration completed successfully!"
             else
-                echo "¡Configuración RAID completada exitosamente!"
+                if [ "$SCRIPT_LANGUAGE" = "en" ]; then
+                    echo "¡RAID configuration completed successfully!"
+                else
+                    echo "¡Configuración RAID completada exitosamente!"
+                fi
             fi
             ;;
         "raid_mounted_at")
@@ -333,7 +348,11 @@ get_text() {
             if [ "$SCRIPT_LANGUAGE" = "en" ]; then
                 echo "Continuing with new RAID configuration..."
             else
-                echo "Continuando con configuración de nuevo RAID..."
+                if [ "$SCRIPT_LANGUAGE" = "en" ]; then
+                    echo "Continuing with new RAID configuration..."
+                else
+                    echo "Continuando con configuración de nuevo RAID..."
+                fi
             fi
             ;;
         "exiting_script")
@@ -528,26 +547,48 @@ check_and_install_requirements() {
                     exit 1
                 fi
             else
-                show_message "🔄 Instalando $package..."
-                if sudo apt install -y "$package" > /dev/null 2>&1; then
-                    show_message "✅ $package instalado exitosamente"
+                if [ "$SCRIPT_LANGUAGE" = "en" ]; then
+                    show_message "🔄 Installing $package..."
+                    if sudo apt install -y "$package" > /dev/null 2>&1; then
+                        show_message "✅ $package installed successfully"
+                    else
+                        show_error "❌ Error installing $package"
+                        exit 1
+                    fi
                 else
-                    show_error "❌ Error instalando $package"
-                    exit 1
+                    show_message "🔄 Instalando $package..."
+                    if sudo apt install -y "$package" > /dev/null 2>&1; then
+                        show_message "✅ $package instalado exitosamente"
+                    else
+                        show_error "❌ Error instalando $package"
+                        exit 1
+                    fi
                 fi
             fi
         done
         
         echo "----------------------------------------"
-        show_message "✅ Todos los paquetes se instalaron correctamente"
+        if [ "$SCRIPT_LANGUAGE" = "en" ]; then
+            show_message "✅ All packages installed successfully"
+        else
+            show_message "✅ Todos los paquetes se instalaron correctamente"
+        fi
         
         # Verificar que ZFS esté funcionando si se instaló
         if [ "$installing_zfs" = true ]; then
-            show_message "🔄 Verificando funcionamiento de ZFS..."
+            if [ "$SCRIPT_LANGUAGE" = "en" ]; then
+                show_message "🔄 Verifying ZFS functionality..."
+            else
+                show_message "🔄 Verificando funcionamiento de ZFS..."
+            fi
             
             # Cargar módulo ZFS si no está cargado
             if ! lsmod | grep -q "^zfs "; then
-                show_message "Cargando módulo ZFS..."
+                if [ "$SCRIPT_LANGUAGE" = "en" ]; then
+                    show_message "Loading ZFS module..."
+                else
+                    show_message "Cargando módulo ZFS..."
+                fi
                 sudo modprobe zfs
                 sleep 2
             fi
@@ -555,14 +596,28 @@ check_and_install_requirements() {
             # Verificar que los comandos funcionen
             if zpool status > /dev/null 2>&1 && zfs version > /dev/null 2>&1; then
                 local zfs_version=$(zfs version | head -1 | awk '{print $2}')
-                show_message "✅ ZFS funcionando correctamente (versión: $zfs_version)"
-            else
-                show_error "❌ ZFS no está funcionando correctamente"
-                show_message "Puede ser necesario reiniciar el sistema"
-                if confirm "¿Deseas continuar de todas formas? (puede fallar)"; then
-                    show_warning "Continuando con ZFS posiblemente no funcional..."
+                if [ "$SCRIPT_LANGUAGE" = "en" ]; then
+                    show_message "✅ ZFS working correctly (version: $zfs_version)"
                 else
-                    exit 1
+                    show_message "✅ ZFS funcionando correctamente (versión: $zfs_version)"
+                fi
+            else
+                if [ "$SCRIPT_LANGUAGE" = "en" ]; then
+                    show_error "❌ ZFS is not working correctly"
+                    show_message "A system restart may be necessary"
+                    if confirm "Do you want to continue anyway? (may fail)"; then
+                        show_warning "Continuing with possibly non-functional ZFS..."
+                    else
+                        exit 1
+                    fi
+                else
+                    show_error "❌ ZFS no está funcionando correctamente"
+                    show_message "Puede ser necesario reiniciar el sistema"
+                    if confirm "¿Deseas continuar de todas formas? (puede fallar)"; then
+                        show_warning "Continuando con ZFS posiblemente no funcional..."
+                    else
+                        exit 1
+                    fi
                 fi
             fi
         fi
@@ -570,11 +625,19 @@ check_and_install_requirements() {
         # Breve pausa para que el usuario vea el resultado
         sleep 1
     else
-        show_message "✅ Todos los requisitos están disponibles"
+        if [ "$SCRIPT_LANGUAGE" = "en" ]; then
+            show_message "✅ All requirements are available"
+        else
+            show_message "✅ Todos los requisitos están disponibles"
+        fi
     fi
     
     # Mostrar resumen final de herramientas disponibles
-    show_message "Herramientas RAID disponibles:"
+    if [ "$SCRIPT_LANGUAGE" = "en" ]; then
+        show_message "Available RAID tools:"
+    else
+        show_message "Herramientas RAID disponibles:"
+    fi
     if command -v mkfs.btrfs &> /dev/null; then
         local btrfs_version=$(btrfs --version 2>/dev/null | awk '{print $2}' || echo "desconocida")
         echo "  ✓ BTRFS (versión: $btrfs_version)"
@@ -612,7 +675,11 @@ detect_existing_raid_configurations() {
             any_raid_found=true
             
             echo ""
-            echo "🔷 POOLS ZFS DETECTADOS:"
+            if [ "$SCRIPT_LANGUAGE" = "en" ]; then
+                echo "🔷 DETECTED ZFS POOLS:"
+            else
+                echo "🔷 POOLS ZFS DETECTADOS:"
+            fi
             for pool in $existing_pools; do
                 local pool_health=$(zpool list -H -o health "$pool" 2>/dev/null)
                 local pool_size=$(zpool list -H -o size "$pool" 2>/dev/null)
@@ -620,27 +687,48 @@ detect_existing_raid_configurations() {
                 local pool_free=$(zpool list -H -o free "$pool" 2>/dev/null)
                 
                 echo "  📦 Pool: $pool"
-                echo "     💚 Estado: $pool_health"
-                echo "     📏 Tamaño: $pool_size (Usado: $pool_used, Libre: $pool_free)"
+                if [ "$SCRIPT_LANGUAGE" = "en" ]; then
+                    echo "     💚 Status: $pool_health"
+                    echo "     📏 Size: $pool_size (Used: $pool_used, Free: $pool_free)"
+                else
+                    echo "     💚 Estado: $pool_health"
+                    echo "     📏 Tamaño: $pool_size (Usado: $pool_used, Libre: $pool_free)"
+                fi
                 
                 # Mostrar datasets existentes
                 local datasets=$(zfs list -H -o name -r "$pool" 2>/dev/null | grep -v "^${pool}$")
                 if [ -n "$datasets" ]; then
                     local dataset_count=$(echo "$datasets" | wc -l)
-                    echo "     📁 Datasets: $dataset_count"
+                    if [ "$SCRIPT_LANGUAGE" = "en" ]; then
+                        echo "     📁 Datasets: $dataset_count"
+                    else
+                        echo "     📁 Datasets: $dataset_count"
+                    fi
                     for dataset in $datasets; do
                         local used=$(zfs list -H -o used "$dataset" 2>/dev/null)
                         local mountpoint=$(zfs list -H -o mountpoint "$dataset" 2>/dev/null)
-                        echo "       • $dataset (Usado: $used, Montaje: $mountpoint)"
+                        if [ "$SCRIPT_LANGUAGE" = "en" ]; then
+                            echo "       • $dataset (Used: $used, Mount: $mountpoint)"
+                        else
+                            echo "       • $dataset (Usado: $used, Montaje: $mountpoint)"
+                        fi
                     done
                 else
-                    echo "     📁 Sin datasets (solo pool raíz)"
+                    if [ "$SCRIPT_LANGUAGE" = "en" ]; then
+                        echo "     📁 No datasets (root pool only)"
+                    else
+                        echo "     📁 Sin datasets (solo pool raíz)"
+                    fi
                 fi
                 
                 # Mostrar dispositivos del pool
                 local pool_devices=$(zpool status "$pool" 2>/dev/null | grep -E "^\s+[a-z]" | awk '{print $1}' | grep -v "raidz\|mirror\|spare\|log\|cache\|replacing" | head -3)
                 if [ -n "$pool_devices" ]; then
-                    echo "     💿 Dispositivos: $(echo $pool_devices | tr '\n' ' ' | sed 's/ *$//')..."
+                    if [ "$SCRIPT_LANGUAGE" = "en" ]; then
+                        echo "     💿 Devices: $(echo $pool_devices | tr '\n' ' ' | sed 's/ *$//')..."
+                    else
+                        echo "     💿 Dispositivos: $(echo $pool_devices | tr '\n' ' ' | sed 's/ *$//')..."
+                    fi
                 fi
                 echo ""
             done
@@ -664,7 +752,11 @@ detect_existing_raid_configurations() {
                 if [ -n "$mount_point" ]; then
                     btrfs_info+=("$device_name:$size:$mount_point:$btrfs_uuid")
                 else
-                    btrfs_info+=("$device_name:$size:no_montado:$btrfs_uuid")
+                    if [ "$SCRIPT_LANGUAGE" = "en" ]; then
+                        btrfs_info+=("$device_name:$size:not_mounted:$btrfs_uuid")
+                    else
+                        btrfs_info+=("$device_name:$size:no_montado:$btrfs_uuid")
+                    fi
                 fi
             fi
         done
@@ -674,26 +766,49 @@ detect_existing_raid_configurations() {
             any_raid_found=true
             
             echo ""
-            echo "🟠 FILESYSTEMS BTRFS DETECTADOS:"
+            if [ "$SCRIPT_LANGUAGE" = "en" ]; then
+                echo "🟠 DETECTED BTRFS FILESYSTEMS:"
+            else
+                echo "🟠 FILESYSTEMS BTRFS DETECTADOS:"
+            fi
             for info in "${btrfs_info[@]}"; do
                 IFS=':' read -r device size mount_point uuid <<< "$info"
-                echo "  📦 Dispositivo: $device"
-                echo "     📏 Tamaño: $size"
-                echo "     📁 Montaje: $mount_point"
-                echo "     🆔 UUID: $uuid"
+                if [ "$SCRIPT_LANGUAGE" = "en" ]; then
+                    echo "  📦 Device: $device"
+                    echo "     📏 Size: $size"
+                    echo "     📁 Mount: $mount_point"
+                    echo "     🆔 UUID: $uuid"
+                else
+                    echo "  📦 Dispositivo: $device"
+                    echo "     📏 Tamaño: $size"
+                    echo "     📁 Montaje: $mount_point"
+                    echo "     🆔 UUID: $uuid"
+                fi
                 
                 # Mostrar información adicional de BTRFS si está montado
-                if [ "$mount_point" != "no_montado" ]; then
+                if [ "$mount_point" != "no_montado" ] && [ "$mount_point" != "not_mounted" ]; then
                     local used=$(df -h "$mount_point" 2>/dev/null | tail -1 | awk '{print $3}')
                     local available=$(df -h "$mount_point" 2>/dev/null | tail -1 | awk '{print $4}')
                     if [ -n "$used" ]; then
-                        echo "     📊 Usado: $used, Disponible: $available"
+                        if [ "$SCRIPT_LANGUAGE" = "en" ]; then
+                            echo "     📊 Used: $used, Available: $available"
+                        else
+                            if [ "$SCRIPT_LANGUAGE" = "en" ]; then
+                                echo "     📊 Used: $used, Available: $available"
+                            else
+                                echo "     📊 Usado: $used, Disponible: $available"
+                            fi
+                        fi
                     fi
                     
                     # Verificar subvolúmenes
                     local subvolumes=$(btrfs subvolume list "$mount_point" 2>/dev/null | wc -l)
                     if [ "$subvolumes" -gt 0 ]; then
-                        echo "     📂 Subvolúmenes: $subvolumes"
+                        if [ "$SCRIPT_LANGUAGE" = "en" ]; then
+                            echo "     📂 Subvolumes: $subvolumes"
+                        else
+                            echo "     📂 Subvolúmenes: $subvolumes"
+                        fi
                     fi
                 fi
                 echo ""
@@ -709,7 +824,11 @@ detect_existing_raid_configurations() {
             any_raid_found=true
             
             echo ""
-            echo "🔴 ARRAYS MDADM DETECTADOS:"
+            if [ "$SCRIPT_LANGUAGE" = "en" ]; then
+                echo "🔴 DETECTED MDADM ARRAYS:"
+            else
+                echo "🔴 ARRAYS MDADM DETECTADOS:"
+            fi
             for array in $mdadm_arrays; do
                 local array_info=$(mdadm --detail "/dev/$array" 2>/dev/null)
                 if [ -n "$array_info" ]; then
@@ -719,15 +838,26 @@ detect_existing_raid_configurations() {
                     local num_devices=$(echo "$array_info" | grep "Total Devices" | awk '{print $4}')
                     
                     echo "  📦 Array: /dev/$array"
-                    echo "     🔧 Nivel RAID: $raid_level"
-                    echo "     📏 Tamaño: $array_size"
-                    echo "     💚 Estado: $state"
-                    echo "     💿 Dispositivos: $num_devices"
+                    if [ "$SCRIPT_LANGUAGE" = "en" ]; then
+                        echo "     🔧 RAID Level: $raid_level"
+                        echo "     📏 Size: $array_size"
+                        echo "     💚 Status: $state"
+                        echo "     💿 Devices: $num_devices"
+                    else
+                        echo "     🔧 Nivel RAID: $raid_level"
+                        echo "     📏 Tamaño: $array_size"
+                        echo "     💚 Estado: $state"
+                        echo "     💿 Dispositivos: $num_devices"
+                    fi
                     
                     # Mostrar dispositivos del array
                     local devices=$(echo "$array_info" | grep "/dev/" | grep -v "failed\|spare" | awk '{print $7}' | head -3)
                     if [ -n "$devices" ]; then
-                        echo "     💿 Miembros: $(echo $devices | tr '\n' ' ' | sed 's/ *$//')..."
+                        if [ "$SCRIPT_LANGUAGE" = "en" ]; then
+                            echo "     💿 Members: $(echo $devices | tr '\n' ' ' | sed 's/ *$//')..."
+                        else
+                            echo "     💿 Miembros: $(echo $devices | tr '\n' ' ' | sed 's/ *$//')..."
+                        fi
                     fi
                     echo ""
                 fi
@@ -743,7 +873,11 @@ detect_existing_raid_configurations() {
             any_raid_found=true
             
             echo ""
-            echo "🟣 VOLUME GROUPS LVM DETECTADOS:"
+            if [ "$SCRIPT_LANGUAGE" = "en" ]; then
+                echo "🟣 DETECTED LVM VOLUME GROUPS:"
+            else
+                echo "🟣 VOLUME GROUPS LVM DETECTADOS:"
+            fi
             for vg in $volume_groups; do
                 local vg_info=$(vgdisplay "$vg" 2>/dev/null)
                 if [ -n "$vg_info" ]; then
@@ -753,10 +887,17 @@ detect_existing_raid_configurations() {
                     local lv_count=$(echo "$vg_info" | grep "Cur LV" | awk '{print $3}')
                     
                     echo "  📦 Volume Group: $vg"
-                    echo "     📏 Tamaño: $vg_size"
-                    echo "     💾 Libre: $vg_free"
-                    echo "     💿 Physical Volumes: $pv_count"
-                    echo "     📁 Logical Volumes: $lv_count"
+                    if [ "$SCRIPT_LANGUAGE" = "en" ]; then
+                        echo "     📏 Size: $vg_size"
+                        echo "     💾 Free: $vg_free"
+                        echo "     💿 Physical Volumes: $pv_count"
+                        echo "     📁 Logical Volumes: $lv_count"
+                    else
+                        echo "     📏 Tamaño: $vg_size"
+                        echo "     💾 Libre: $vg_free"
+                        echo "     💿 Physical Volumes: $pv_count"
+                        echo "     📁 Logical Volumes: $lv_count"
+                    fi
                     
                     # Mostrar logical volumes
                     local logical_volumes=$(lvdisplay "$vg" 2>/dev/null | grep "LV Name" | awk '{print $3}' | head -3)
@@ -879,11 +1020,19 @@ detect_existing_raid_configurations() {
 
 # Función para mostrar detalles de arrays MDADM
 show_mdadm_details() {
-    show_title "Detalles de Arrays MDADM"
+    if [ "$SCRIPT_LANGUAGE" = "en" ]; then
+        show_title "MDADM Array Details"
+    else
+        show_title "Detalles de Arrays MDADM"
+    fi
     
     local mdadm_arrays=$(cat /proc/mdstat 2>/dev/null | grep "^md" | awk '{print $1}')
     if [ -z "$mdadm_arrays" ]; then
-        show_warning "No se encontraron arrays MDADM"
+        if [ "$SCRIPT_LANGUAGE" = "en" ]; then
+            show_warning "No MDADM arrays found"
+        else
+            show_warning "No se encontraron arrays MDADM"
+        fi
         return 0
     fi
     
@@ -910,11 +1059,19 @@ show_mdadm_details() {
 
 # Función para mostrar detalles de Volume Groups LVM
 show_lvm_details() {
-    show_title "Detalles de Volume Groups LVM"
+    if [ "$SCRIPT_LANGUAGE" = "en" ]; then
+        show_title "LVM Volume Group Details"
+    else
+        show_title "Detalles de Volume Groups LVM"
+    fi
     
     local volume_groups=$(vgdisplay 2>/dev/null | grep "VG Name" | awk '{print $3}')
     if [ -z "$volume_groups" ]; then
-        show_warning "No se encontraron Volume Groups LVM"
+        if [ "$SCRIPT_LANGUAGE" = "en" ]; then
+            show_warning "No LVM Volume Groups found"
+        else
+            show_warning "No se encontraron Volume Groups LVM"
+        fi
         return 0
     fi
     
@@ -941,11 +1098,19 @@ show_lvm_details() {
 
 # Función para eliminar pools ZFS existentes
 delete_existing_zfs_pools() {
-    show_title "Eliminación de Pools ZFS Existentes"
+    if [ "$SCRIPT_LANGUAGE" = "en" ]; then
+        show_title "Delete Existing ZFS Pools"
+    else
+        show_title "Eliminación de Pools ZFS Existentes"
+    fi
     
     local existing_pools=$(zpool list -H -o name 2>/dev/null)
     if [ -z "$existing_pools" ]; then
-        show_warning "No se encontraron pools ZFS para eliminar"
+        if [ "$SCRIPT_LANGUAGE" = "en" ]; then
+            show_warning "No ZFS pools found for deletion"
+        else
+            show_warning "No se encontraron pools ZFS para eliminar"
+        fi
         return 0
     fi
     
@@ -974,33 +1139,66 @@ delete_existing_zfs_pools() {
     done
     
     echo ""
-    echo "Opciones de eliminación:"
-    echo "  • Número del pool (ej: 1, 2, 3)"
-    echo "  • Múltiples pools separados por espacios (ej: 1 3 4)"
-    echo "  • 'all' - Eliminar TODOS los pools (¡PELIGROSO!)"
-    echo "  • 'cancel' - Cancelar operación"
+    if [ "$SCRIPT_LANGUAGE" = "en" ]; then
+        echo "Deletion options:"
+        echo "  • Pool number (e.g., 1, 2, 3)"
+        echo "  • Multiple pools separated by spaces (e.g., 1 3 4)"
+        echo "  • 'all' - Delete ALL pools (DANGEROUS!)"
+        echo "  • 'cancel' - Cancel operation"
+    else
+        echo "Opciones de eliminación:"
+        echo "  • Número del pool (ej: 1, 2, 3)"
+        echo "  • Múltiples pools separados por espacios (ej: 1 3 4)"
+        echo "  • 'all' - Eliminar TODOS los pools (¡PELIGROSO!)"
+        echo "  • 'cancel' - Cancelar operación"
+    fi
     echo ""
     
     while true; do
-        read -p "👉 Pools a eliminar: " choice
+        if [ "$SCRIPT_LANGUAGE" = "en" ]; then
+            read -p "👉 Pools to delete: " choice
+        else
+            read -p "👉 Pools a eliminar: " choice
+        fi
         
         if [ "$choice" = "cancel" ]; then
-            show_message "Operación cancelada por el usuario"
+            if [ "$SCRIPT_LANGUAGE" = "en" ]; then
+                show_message "Operation cancelled by user"
+            else
+                show_message "Operación cancelada por el usuario"
+            fi
             return 0
         elif [ "$choice" = "all" ]; then
-            show_warning "⚠️  ¡ADVERTENCIA! Vas a eliminar TODOS los pools ZFS"
-            show_warning "⚠️  Esto incluye: ${pools_array[*]}"
-            
-            if confirm "¿Estás ABSOLUTAMENTE SEGURO de eliminar TODOS los pools?"; then
-                for pool in "${pools_array[@]}"; do
-                    echo ""
-                    destroy_zfs_pool_safely "$pool"
-                done
-                show_message "✅ Todos los pools han sido procesados"
-                return 0
+            if [ "$SCRIPT_LANGUAGE" = "en" ]; then
+                show_warning "⚠️  WARNING! You are going to delete ALL ZFS pools"
+                show_warning "⚠️  This includes: ${pools_array[*]}"
+                
+                if confirm "Are you ABSOLUTELY SURE to delete ALL pools?"; then
+                    for pool in "${pools_array[@]}"; do
+                        echo ""
+                        destroy_zfs_pool_safely "$pool"
+                    done
+                    show_message "✅ All pools have been processed"
+                    return 0
+                else
+                    show_message "Mass deletion cancelled"
+                    continue
+                fi
             else
-                show_message "Eliminación masiva cancelada"
-                continue
+                show_warning "⚠️  ¡ADVERTENCIA! Vas a eliminar TODOS los pools ZFS"
+                show_warning "⚠️  Esto incluye: ${pools_array[*]}"
+                
+                if confirm "¿Estás ABSOLUTAMENTE SEGURO de eliminar TODOS los pools?"; then
+                    for pool in "${pools_array[@]}"; do
+                        echo ""
+                        destroy_zfs_pool_safely "$pool"
+                    done
+                    show_message "✅ Todos los pools han sido procesados"
+                    return 0
+                else
+                    show_message "Eliminación masiva cancelada"
+                    continue
+                fi
             fi
         elif [[ "$choice" =~ ^[0-9\ ]+$ ]]; then
             # Validar selecciones
@@ -1025,13 +1223,21 @@ delete_existing_zfs_pools() {
             fi
             
             if [ ${#valid_selections[@]} -eq 0 ]; then
-                show_error "No se seleccionaron pools válidos"
+                if [ "$SCRIPT_LANGUAGE" = "en" ]; then
+                    show_error "No valid pools selected"
+                else
+                    show_error "No se seleccionaron pools válidos"
+                fi
                 continue
             fi
             
             # Mostrar resumen de pools a eliminar
             echo ""
-            show_warning "Pools seleccionados para eliminación:"
+            if [ "$SCRIPT_LANGUAGE" = "en" ]; then
+                show_warning "Pools selected for deletion:"
+            else
+                show_warning "Pools seleccionados para eliminación:"
+            fi
             for pool in "${valid_selections[@]}"; do
                 local pool_size=$(zpool list -H -o size "$pool" 2>/dev/null)
                 local pool_used=$(zpool list -H -o allocated "$pool" 2>/dev/null)
@@ -1039,16 +1245,30 @@ delete_existing_zfs_pools() {
             done
             
             echo ""
-            if confirm "¿Confirmas la eliminación de estos ${#valid_selections[@]} pools?"; then
-                for pool in "${valid_selections[@]}"; do
-                    echo ""
-                    destroy_zfs_pool_safely "$pool"
-                done
-                show_message "✅ Pools seleccionados han sido procesados"
-                return 0
+            if [ "$SCRIPT_LANGUAGE" = "en" ]; then
+                if confirm "Do you confirm the deletion of these ${#valid_selections[@]} pools?"; then
+                    for pool in "${valid_selections[@]}"; do
+                        echo ""
+                        destroy_zfs_pool_safely "$pool"
+                    done
+                    show_message "✅ Selected pools have been processed"
+                    return 0
+                else
+                    show_message "Deletion cancelled"
+                    continue
+                fi
             else
-                show_message "Eliminación cancelada"
-                continue
+                if confirm "¿Confirmas la eliminación de estos ${#valid_selections[@]} pools?"; then
+                    for pool in "${valid_selections[@]}"; do
+                        echo ""
+                        destroy_zfs_pool_safely "$pool"
+                    done
+                    show_message "✅ Pools seleccionados han sido procesados"
+                    return 0
+                else
+                    show_message "Eliminación cancelada"
+                    continue
+                fi
             fi
         else
             echo "❌ Opción inválida. Usa números, 'all' o 'cancel'"
@@ -1084,9 +1304,17 @@ detect_and_manage_btrfs() {
     done
     
     if [ ${#btrfs_devices[@]} -gt 0 ]; then
-        show_title "Filesystems BTRFS Existentes Detectados"
+        if [ "$SCRIPT_LANGUAGE" = "en" ]; then
+            show_title "Existing BTRFS Filesystems Detected"
+        else
+            show_title "Filesystems BTRFS Existentes Detectados"
+        fi
         echo ""
-        echo "Se encontraron los siguientes filesystems BTRFS:"
+        if [ "$SCRIPT_LANGUAGE" = "en" ]; then
+            echo "The following BTRFS filesystems were found:"
+        else
+            echo "Se encontraron los siguientes filesystems BTRFS:"
+        fi
         
         for info in "${btrfs_info[@]}"; do
             IFS=':' read -r device size mount_point uuid <<< "$info"
@@ -1110,11 +1338,19 @@ detect_and_manage_btrfs() {
                     break
                     ;;
                 2)
-                    show_message "Continuando sin modificar filesystems BTRFS..."
+                    if [ "$SCRIPT_LANGUAGE" = "en" ]; then
+                        show_message "Continuing without modifying BTRFS filesystems..."
+                    else
+                        show_message "Continuando sin modificar filesystems BTRFS..."
+                    fi
                     break
                     ;;
                 *)
-                    echo "❌ Opción inválida. Selecciona 1 o 2."
+                    if [ "$SCRIPT_LANGUAGE" = "en" ]; then
+                        echo "❌ Invalid option. Select 1 or 2."
+                    else
+                        echo "❌ Opción inválida. Selecciona 1 o 2."
+                    fi
                     ;;
             esac
         done
@@ -1127,7 +1363,11 @@ detect_and_manage_btrfs() {
 delete_existing_btrfs() {
     local btrfs_devices=("$@")
     
-    show_title "Eliminación de Filesystems BTRFS"
+    if [ "$SCRIPT_LANGUAGE" = "en" ]; then
+        show_title "Delete BTRFS Filesystems"
+    else
+        show_title "Eliminación de Filesystems BTRFS"
+    fi
     
     echo "⚠️  ADVERTENCIA: Esta operación eliminará completamente los filesystems seleccionados"
     echo "🔥 TODOS LOS DATOS SE PERDERÁN PERMANENTEMENTE"
@@ -1151,18 +1391,34 @@ delete_existing_btrfs() {
     done
     
     echo ""
-    echo "Opciones de eliminación:"
-    echo "  • Número del dispositivo (ej: 1, 2, 3)"
-    echo "  • Múltiples dispositivos separados por espacios (ej: 1 3)"
-    echo "  • 'all' - Eliminar TODOS los filesystems BTRFS"
-    echo "  • 'cancel' - Cancelar operación"
+    if [ "$SCRIPT_LANGUAGE" = "en" ]; then
+        echo "Deletion options:"
+        echo "  • Device number (e.g., 1, 2, 3)"
+        echo "  • Multiple devices separated by spaces (e.g., 1 3)"
+        echo "  • 'all' - Delete ALL BTRFS filesystems"
+        echo "  • 'cancel' - Cancel operation"
+    else
+        echo "Opciones de eliminación:"
+        echo "  • Número del dispositivo (ej: 1, 2, 3)"
+        echo "  • Múltiples dispositivos separados por espacios (ej: 1 3)"
+        echo "  • 'all' - Eliminar TODOS los filesystems BTRFS"
+        echo "  • 'cancel' - Cancelar operación"
+    fi
     echo ""
     
     while true; do
-        read -p "👉 Filesystems a eliminar: " choice
+        if [ "$SCRIPT_LANGUAGE" = "en" ]; then
+            read -p "👉 Filesystems to delete: " choice
+        else
+            read -p "👉 Filesystems a eliminar: " choice
+        fi
         
         if [ "$choice" = "cancel" ]; then
-            show_message "Operación cancelada por el usuario"
+            if [ "$SCRIPT_LANGUAGE" = "en" ]; then
+                show_message "Operation cancelled by user"
+            else
+                show_message "Operación cancelada por el usuario"
+            fi
             return 0
         elif [ "$choice" = "all" ]; then
             show_warning "⚠️  ¡ADVERTENCIA! Vas a eliminar TODOS los filesystems BTRFS"
@@ -1190,10 +1446,18 @@ delete_existing_btrfs() {
                         destroy_btrfs_array_safely "$device" "$device_uuid"
                     fi
                 done
-                show_message "✅ Todos los filesystems BTRFS han sido procesados"
+                if [ "$SCRIPT_LANGUAGE" = "en" ]; then
+                    show_message "✅ All BTRFS filesystems have been processed"
+                else
+                    show_message "✅ Todos los filesystems BTRFS han sido procesados"
+                fi
                 return 0
             else
-                show_message "Eliminación masiva cancelada"
+                if [ "$SCRIPT_LANGUAGE" = "en" ]; then
+                    show_message "Mass deletion cancelled"
+                else
+                    show_message "Eliminación masiva cancelada"
+                fi
                 continue
             fi
         elif [[ "$choice" =~ ^[0-9\ ]+$ ]]; then
@@ -1219,13 +1483,21 @@ delete_existing_btrfs() {
             fi
             
             if [ ${#valid_selections[@]} -eq 0 ]; then
-                show_error "No se seleccionaron dispositivos válidos"
+                if [ "$SCRIPT_LANGUAGE" = "en" ]; then
+                    show_error "No valid devices selected"
+                else
+                    show_error "No se seleccionaron dispositivos válidos"
+                fi
                 continue
             fi
             
             # Mostrar resumen de dispositivos a eliminar
             echo ""
-            show_warning "Filesystems BTRFS seleccionados para eliminación:"
+            if [ "$SCRIPT_LANGUAGE" = "en" ]; then
+                show_warning "BTRFS filesystems selected for deletion:"
+            else
+                show_warning "Filesystems BTRFS seleccionados para eliminación:"
+            fi
             for device in "${valid_selections[@]}"; do
                 local size=$(lsblk -dpno SIZE "/dev/$device" | tr -d ' ')
                 echo "  🗑️  $device (Tamaño: $size)"
@@ -1257,10 +1529,18 @@ delete_existing_btrfs() {
                         fi
                     fi
                 done
-                show_message "✅ Filesystems BTRFS seleccionados han sido procesados"
+                if [ "$SCRIPT_LANGUAGE" = "en" ]; then
+                    show_message "✅ Selected BTRFS filesystems have been processed"
+                else
+                    show_message "✅ Filesystems BTRFS seleccionados han sido procesados"
+                fi
                 return 0
             else
-                show_message "Eliminación cancelada"
+                if [ "$SCRIPT_LANGUAGE" = "en" ]; then
+                    show_message "Deletion cancelled"
+                else
+                    show_message "Eliminación cancelada"
+                fi
                 continue
             fi
         else
@@ -1271,28 +1551,48 @@ delete_existing_btrfs() {
 
 # Función para gestionar datasets de pools existentes
 manage_existing_pools_datasets() {
-    show_title "Gestión de Datasets en Pools Existentes"
+    if [ "$SCRIPT_LANGUAGE" = "en" ]; then
+        show_title "Dataset Management in Existing Pools"
+    else
+        show_title "Gestión de Datasets en Pools Existentes"
+    fi
     
     local existing_pools=$(zpool list -H -o name 2>/dev/null)
     local pools_array=($existing_pools)
     
-    echo "Selecciona el pool donde quieres gestionar datasets:"
+    if [ "$SCRIPT_LANGUAGE" = "en" ]; then
+        echo "Select the pool where you want to manage datasets:"
+    else
+        echo "Selecciona el pool donde quieres gestionar datasets:"
+    fi
     for i in "${!pools_array[@]}"; do
         local pool="${pools_array[$i]}"
         local pool_health=$(zpool list -H -o health "$pool" 2>/dev/null)
         local pool_free=$(zpool list -H -o free "$pool" 2>/dev/null)
-        echo "  $((i+1)). $pool (Estado: $pool_health, Libre: $pool_free)"
+        if [ "$SCRIPT_LANGUAGE" = "en" ]; then
+            echo "  $((i+1)). $pool (Health: $pool_health, Free: $pool_free)"
+        else
+            echo "  $((i+1)). $pool (Estado: $pool_health, Libre: $pool_free)"
+        fi
     done
     echo ""
     
     while true; do
-        read -p "👉 Selecciona pool (1-${#pools_array[@]}): " pool_choice
+        if [ "$SCRIPT_LANGUAGE" = "en" ]; then
+            read -p "👉 Select pool (1-${#pools_array[@]}): " pool_choice
+        else
+            read -p "👉 Selecciona pool (1-${#pools_array[@]}): " pool_choice
+        fi
         if [[ "$pool_choice" =~ ^[0-9]+$ ]] && [ "$pool_choice" -ge 1 ] && [ "$pool_choice" -le ${#pools_array[@]} ]; then
             local selected_pool="${pools_array[$((pool_choice-1))]}"
             create_datasets_in_pool "$selected_pool"
             break
         else
-            echo "❌ Selección inválida. Usa números del 1 al ${#pools_array[@]}."
+            if [ "$SCRIPT_LANGUAGE" = "en" ]; then
+                echo "❌ Invalid selection. Use numbers from 1 to ${#pools_array[@]}."
+            else
+                echo "❌ Selección inválida. Usa números del 1 al ${#pools_array[@]}."
+            fi
         fi
     done
     
@@ -1308,7 +1608,11 @@ manage_existing_pools_datasets() {
 delete_dataset_from_pool() {
     local pool_name="$1"
     
-    show_title "Eliminación de Datasets en Pool '$pool_name'"
+    if [ "$SCRIPT_LANGUAGE" = "en" ]; then
+        show_title "Delete Datasets in Pool '$pool_name'"
+    else
+        show_title "Eliminación de Datasets en Pool '$pool_name'"
+    fi
     
     # Obtener datasets existentes (excluyendo el pool raíz)
     local existing_datasets=$(zfs list -H -o name -r "$pool_name" 2>/dev/null | grep -v "^${pool_name}$")
@@ -1326,10 +1630,19 @@ delete_dataset_from_pool() {
     done <<< "$existing_datasets"
     
     echo ""
-    echo "⚠️  ADVERTENCIA: La eliminación de datasets es PERMANENTE"
-    echo "🔥 TODOS LOS DATOS del dataset seleccionado se perderán"
+    if [ "$SCRIPT_LANGUAGE" = "en" ]; then
+        echo "⚠️  WARNING: Dataset deletion is PERMANENT"
+        echo "🔥 ALL DATA from the selected dataset will be lost"
+    else
+        echo "⚠️  ADVERTENCIA: La eliminación de datasets es PERMANENTE"
+        echo "🔥 TODOS LOS DATOS del dataset seleccionado se perderán"
+    fi
     echo ""
-    echo "📁 Datasets disponibles para eliminar:"
+    if [ "$SCRIPT_LANGUAGE" = "en" ]; then
+        echo "📁 Datasets available for deletion:"
+    else
+        echo "📁 Datasets disponibles para eliminar:"
+    fi
     
     for i in "${!datasets_array[@]}"; do
         local dataset="${datasets_array[$i]}"
@@ -1343,47 +1656,93 @@ delete_dataset_from_pool() {
         # Mostrar snapshots si existen
         local snapshots=$(zfs list -t snapshot -H -o name "$dataset" 2>/dev/null | wc -l)
         if [ "$snapshots" -gt 0 ]; then
-            echo "     📸 Snapshots: $snapshots (también serán eliminados)"
+            if [ "$SCRIPT_LANGUAGE" = "en" ]; then
+                echo "     📸 Snapshots: $snapshots (will also be deleted)"
+            else
+                echo "     📸 Snapshots: $snapshots (también serán eliminados)"
+            fi
         fi
         echo ""
     done
     
-    echo "Opciones de eliminación:"
-    echo "  • Número del dataset (ej: 1, 2, 3)"
-    echo "  • Múltiples datasets separados por espacios (ej: 1 3 4)"
-    echo "  • 'all' - Eliminar TODOS los datasets (¡PELIGROSO!)"
-    echo "  • 'cancel' - Cancelar operación"
+    if [ "$SCRIPT_LANGUAGE" = "en" ]; then
+        echo "Deletion options:"
+        echo "  • Dataset number (e.g., 1, 2, 3)"
+        echo "  • Multiple datasets separated by spaces (e.g., 1 3 4)"
+        echo "  • 'all' - Delete ALL datasets (DANGEROUS!)"
+        echo "  • 'cancel' - Cancel operation"
+    else
+        echo "Opciones de eliminación:"
+        echo "  • Número del dataset (ej: 1, 2, 3)"
+        echo "  • Múltiples datasets separados por espacios (ej: 1 3 4)"
+        echo "  • 'all' - Eliminar TODOS los datasets (¡PELIGROSO!)"
+        echo "  • 'cancel' - Cancelar operación"
+    fi
     echo ""
     
     while true; do
-        read -p "👉 Datasets a eliminar: " choice
+        if [ "$SCRIPT_LANGUAGE" = "en" ]; then
+            read -p "👉 Datasets to delete: " choice
+        else
+            read -p "👉 Datasets a eliminar: " choice
+        fi
         
         if [ "$choice" = "cancel" ]; then
-            show_message "Eliminación cancelada por el usuario"
+            if [ "$SCRIPT_LANGUAGE" = "en" ]; then
+                show_message "Deletion cancelled by user"
+            else
+                show_message "Eliminación cancelada por el usuario"
+            fi
             return 0
         elif [ "$choice" = "all" ]; then
-            show_warning "⚠️  ¡ADVERTENCIA! Vas a eliminar TODOS los datasets"
-            show_warning "⚠️  Esto incluye: ${datasets_array[*]}"
-            echo ""
-            echo "🔥 ESTO ELIMINARÁ PERMANENTEMENTE:"
-            for dataset in "${datasets_array[@]}"; do
-                local used=$(zfs list -H -o used "$dataset" 2>/dev/null)
-                echo "   • $dataset (Usado: $used)"
-            done
-            echo ""
-            
-            if confirm "¿Estás ABSOLUTAMENTE SEGURO de eliminar TODOS los datasets?"; then
-                # Eliminar en orden inverso para manejar dependencias
-                for ((i=${#datasets_array[@]}-1; i>=0; i--)); do
-                    local dataset="${datasets_array[$i]}"
-                    echo ""
-                    delete_dataset_safely "$dataset"
+            if [ "$SCRIPT_LANGUAGE" = "en" ]; then
+                show_warning "⚠️  WARNING! You are going to delete ALL datasets"
+                show_warning "⚠️  This includes: ${datasets_array[*]}"
+                echo ""
+                echo "🔥 THIS WILL PERMANENTLY DELETE:"
+                for dataset in "${datasets_array[@]}"; do
+                    local used=$(zfs list -H -o used "$dataset" 2>/dev/null)
+                    echo "   • $dataset (Used: $used)"
                 done
-                show_message "✅ Todos los datasets han sido procesados"
-                return 0
+                echo ""
+                
+                if confirm "Are you ABSOLUTELY SURE to delete ALL datasets?"; then
+                    # Eliminar en orden inverso para manejar dependencias
+                    for ((i=${#datasets_array[@]}-1; i>=0; i--)); do
+                        local dataset="${datasets_array[$i]}"
+                        echo ""
+                        delete_dataset_safely "$dataset"
+                    done
+                    show_message "✅ All datasets have been processed"
+                    return 0
+                else
+                    show_message "Mass deletion cancelled"
+                    continue
+                fi
             else
-                show_message "Eliminación masiva cancelada"
-                continue
+                show_warning "⚠️  ¡ADVERTENCIA! Vas a eliminar TODOS los datasets"
+                show_warning "⚠️  Esto incluye: ${datasets_array[*]}"
+                echo ""
+                echo "🔥 ESTO ELIMINARÁ PERMANENTEMENTE:"
+                for dataset in "${datasets_array[@]}"; do
+                    local used=$(zfs list -H -o used "$dataset" 2>/dev/null)
+                    echo "   • $dataset (Usado: $used)"
+                done
+                echo ""
+                
+                if confirm "¿Estás ABSOLUTAMENTE SEGURO de eliminar TODOS los datasets?"; then
+                    # Eliminar en orden inverso para manejar dependencias
+                    for ((i=${#datasets_array[@]}-1; i>=0; i--)); do
+                        local dataset="${datasets_array[$i]}"
+                        echo ""
+                        delete_dataset_safely "$dataset"
+                    done
+                    show_message "✅ Todos los datasets han sido procesados"
+                    return 0
+                else
+                    show_message "Eliminación masiva cancelada"
+                    continue
+                fi
             fi
         elif [[ "$choice" =~ ^[0-9\ ]+$ ]]; then
             # Validar selecciones
@@ -1494,42 +1853,85 @@ delete_dataset_safely() {
     fi
     
     echo ""
-    show_warning "⚠️  ESTA ACCIÓN ELIMINARÁ PERMANENTEMENTE:"
-    show_warning "    • El dataset '$dataset' y todos sus datos"
-    if [ -n "$snapshots" ]; then
-        show_warning "    • Todos los snapshots del dataset"
-    fi
-    if [ -n "$child_datasets" ]; then
-        show_warning "    • Todos los datasets hijos y sus datos"
+    if [ "$SCRIPT_LANGUAGE" = "en" ]; then
+        show_warning "⚠️  THIS ACTION WILL PERMANENTLY DELETE:"
+        show_warning "    • The dataset '$dataset' and all its data"
+        if [ -n "$snapshots" ]; then
+            show_warning "    • All dataset snapshots"
+        fi
+        if [ -n "$child_datasets" ]; then
+            show_warning "    • All child datasets and their data"
+        fi
+    else
+        show_warning "⚠️  ESTA ACCIÓN ELIMINARÁ PERMANENTEMENTE:"
+        show_warning "    • El dataset '$dataset' y todos sus datos"
+        if [ -n "$snapshots" ]; then
+            show_warning "    • Todos los snapshots del dataset"
+        fi
+        if [ -n "$child_datasets" ]; then
+            show_warning "    • Todos los datasets hijos y sus datos"
+        fi
     fi
     echo ""
     
     # Proceder con la eliminación
-    show_message "🔄 Eliminando dataset '$dataset'..."
+    if [ "$SCRIPT_LANGUAGE" = "en" ]; then
+        show_message "🔄 Deleting dataset '$dataset'..."
+    else
+        show_message "🔄 Eliminando dataset '$dataset'..."
+    fi
     
     # 1. Desmontar el dataset si está montado
     if [ "$mountpoint" != "none" ] && [ "$mountpoint" != "-" ]; then
-        show_message "Desmontando dataset..."
+        if [ "$SCRIPT_LANGUAGE" = "en" ]; then
+            show_message "Unmounting dataset..."
+        else
+            show_message "Desmontando dataset..."
+        fi
         sudo zfs unmount "$dataset" 2>/dev/null || true
     fi
     
     # 2. Eliminar el dataset con todos sus snapshots y descendientes
-    show_message "Destruyendo dataset y dependencias..."
-    if sudo zfs destroy -r "$dataset" 2>/dev/null; then
-        show_message "✅ Dataset '$dataset' eliminado exitosamente"
+    if [ "$SCRIPT_LANGUAGE" = "en" ]; then
+        show_message "Destroying dataset and dependencies..."
     else
-        show_warning "⚠️  Intento estándar falló, intentando eliminación forzada..."
-        
-        # Intentar eliminación forzada
-        if sudo zfs destroy -f -r "$dataset" 2>/dev/null; then
-            show_message "✅ Dataset '$dataset' eliminado forzadamente"
+        show_message "Destruyendo dataset y dependencias..."
+    fi
+    if sudo zfs destroy -r "$dataset" 2>/dev/null; then
+        if [ "$SCRIPT_LANGUAGE" = "en" ]; then
+            show_message "✅ Dataset '$dataset' deleted successfully"
         else
-            show_error "❌ No se pudo eliminar el dataset '$dataset'"
-            show_error "    Posibles causas:"
-            show_error "    • Dataset en uso por algún proceso"
-            show_error "    • Dependencias de snapshots o clones"
-            show_error "    • Permisos insuficientes"
-            return 1
+            show_message "✅ Dataset '$dataset' eliminado exitosamente"
+        fi
+    else
+        if [ "$SCRIPT_LANGUAGE" = "en" ]; then
+            show_warning "⚠️  Standard attempt failed, trying forced deletion..."
+            
+            # Intentar eliminación forzada
+            if sudo zfs destroy -f -r "$dataset" 2>/dev/null; then
+                show_message "✅ Dataset '$dataset' forcibly deleted"
+            else
+                show_error "❌ Could not delete dataset '$dataset'"
+                show_error "    Possible causes:"
+                show_error "    • Dataset in use by some process"
+                show_error "    • Snapshot or clone dependencies"
+                show_error "    • Insufficient permissions"
+                return 1
+            fi
+        else
+            show_warning "⚠️  Intento estándar falló, intentando eliminación forzada..."
+            
+            # Intentar eliminación forzada
+            if sudo zfs destroy -f -r "$dataset" 2>/dev/null; then
+                show_message "✅ Dataset '$dataset' eliminado forzadamente"
+            else
+                show_error "❌ No se pudo eliminar el dataset '$dataset'"
+                show_error "    Posibles causas:"
+                show_error "    • Dataset en uso por algún proceso"
+                show_error "    • Dependencias de snapshots o clones"
+                show_error "    • Permisos insuficientes"
+                return 1
+            fi
         fi
     fi
     
@@ -1540,9 +1942,17 @@ delete_dataset_safely() {
 create_datasets_in_pool() {
     local pool_name="$1"
     
-    show_title "Gestión de Datasets en Pool '$pool_name'"
+    if [ "$SCRIPT_LANGUAGE" = "en" ]; then
+        show_title "Dataset Management in Pool '$pool_name'"
+    else
+        show_title "Gestión de Datasets en Pool '$pool_name'"
+    fi
     echo ""
-    echo "💡 INFORMACIÓN SOBRE DATASETS:"
+    if [ "$SCRIPT_LANGUAGE" = "en" ]; then
+        echo "💡 DATASET INFORMATION:"
+    else
+        echo "💡 INFORMACIÓN SOBRE DATASETS:"
+    fi
     echo "   Los datasets son subdivisiones lógicas dentro del pool ZFS."
     echo "   Beneficios:"
     echo "   • Organización de datos (data, backups, media, etc.)"
@@ -1603,7 +2013,11 @@ create_datasets_in_pool() {
                     local used=$(zfs list -H -o used "$dataset" 2>/dev/null)
                     local avail=$(zfs list -H -o avail "$dataset" 2>/dev/null)
                     local mountpoint=$(zfs list -H -o mountpoint "$dataset" 2>/dev/null)
-                    echo "  ✓ $dataset (Usado: $used, Disponible: $avail, Montaje: $mountpoint)"
+                    if [ "$SCRIPT_LANGUAGE" = "en" ]; then
+                        echo "  ✓ $dataset (Used: $used, Available: $avail, Mount: $mountpoint)"
+                    else
+                        echo "  ✓ $dataset (Usado: $used, Disponible: $avail, Montaje: $mountpoint)"
+                    fi
                 done
                 echo ""
             else
@@ -1615,20 +2029,36 @@ create_datasets_in_pool() {
         elif [ "$dataset_choice" = "suggested" ]; then
             local suggested_datasets=("data" "media" "backups")
             
-            show_message "Creando datasets sugeridos: ${suggested_datasets[*]}"
+            if [ "$SCRIPT_LANGUAGE" = "en" ]; then
+                show_message "Creating suggested datasets: ${suggested_datasets[*]}"
+            else
+                show_message "Creando datasets sugeridos: ${suggested_datasets[*]}"
+            fi
             
             for dataset in "${suggested_datasets[@]}"; do
                 # Verificar si ya existe
                 if zfs list "$pool_name/$dataset" >/dev/null 2>&1; then
-                    show_message "ℹ️  Dataset '$pool_name/$dataset' ya existe"
+                    if [ "$SCRIPT_LANGUAGE" = "en" ]; then
+                        show_message "ℹ️  Dataset '$pool_name/$dataset' already exists"
+                    else
+                        show_message "ℹ️  Dataset '$pool_name/$dataset' ya existe"
+                    fi
                     continue
                 fi
                 
-                show_message "Creando dataset: $pool_name/$dataset"
+                if [ "$SCRIPT_LANGUAGE" = "en" ]; then
+                    show_message "Creating dataset: $pool_name/$dataset"
+                else
+                    show_message "Creando dataset: $pool_name/$dataset"
+                fi
                 
                 if sudo zfs create "$pool_name/$dataset"; then
                     datasets_created+=("$dataset")
-                    show_message "✅ Dataset '$pool_name/$dataset' creado exitosamente"
+                    if [ "$SCRIPT_LANGUAGE" = "en" ]; then
+                        show_message "✅ Dataset '$pool_name/$dataset' created successfully"
+                    else
+                        show_message "✅ Dataset '$pool_name/$dataset' creado exitosamente"
+                    fi
                     
                     # Configurar montaje automático
                     sudo zfs set mountpoint="/$pool_name/$dataset" "$pool_name/$dataset"
@@ -1639,37 +2069,65 @@ create_datasets_in_pool() {
                             # Optimizar para archivos grandes
                             sudo zfs set recordsize=1M "$pool_name/$dataset"
                             sudo zfs set compression=lz4 "$pool_name/$dataset"
-                            show_message "  📺 Optimizado para archivos multimedia"
+                            if [ "$SCRIPT_LANGUAGE" = "en" ]; then
+                                show_message "  📺 Optimized for multimedia files"
+                            else
+                                show_message "  📺 Optimizado para archivos multimedia"
+                            fi
                             ;;
                         "backups")
                             # Máxima compresión para backups
                             sudo zfs set compression=gzip "$pool_name/$dataset"
                             sudo zfs set dedup=on "$pool_name/$dataset" 2>/dev/null || true
-                            show_message "  💾 Optimizado para backups (alta compresión)"
+                            if [ "$SCRIPT_LANGUAGE" = "en" ]; then
+                                show_message "  💾 Optimized for backups (high compression)"
+                            else
+                                show_message "  💾 Optimizado para backups (alta compresión)"
+                            fi
                             ;;
                         "data")
                             # Balance entre compresión y rendimiento
                             sudo zfs set compression=lz4 "$pool_name/$dataset"
-                            show_message "  📁 Optimizado para datos generales"
+                            if [ "$SCRIPT_LANGUAGE" = "en" ]; then
+                                show_message "  📁 Optimized for general data"
+                            else
+                                show_message "  📁 Optimizado para datos generales"
+                            fi
                             ;;
                     esac
                 else
-                    show_error "❌ Error creando dataset '$pool_name/$dataset'"
+                    if [ "$SCRIPT_LANGUAGE" = "en" ]; then
+                        show_error "❌ Error creating dataset '$pool_name/$dataset'"
+                    else
+                        show_error "❌ Error creando dataset '$pool_name/$dataset'"
+                    fi
                 fi
             done
             
         elif [ -n "$dataset_choice" ] && [[ "$dataset_choice" =~ ^[a-zA-Z0-9_-]+$ ]]; then
             # Crear dataset individual
             if zfs list "$pool_name/$dataset_choice" >/dev/null 2>&1; then
-                show_message "ℹ️  Dataset '$pool_name/$dataset_choice' ya existe"
+                if [ "$SCRIPT_LANGUAGE" = "en" ]; then
+                    show_message "ℹ️  Dataset '$pool_name/$dataset_choice' already exists"
+                else
+                    show_message "ℹ️  Dataset '$pool_name/$dataset_choice' ya existe"
+                fi
                 continue
             fi
             
-            show_message "Creando dataset: $pool_name/$dataset_choice"
+            if [ "$SCRIPT_LANGUAGE" = "en" ]; then
+                show_message "Creating dataset: $pool_name/$dataset_choice"
+            else
+                show_message "Creando dataset: $pool_name/$dataset_choice"
+            fi
             
             if sudo zfs create "$pool_name/$dataset_choice"; then
                 datasets_created+=("$dataset_choice")
-                show_message "✅ Dataset '$pool_name/$dataset_choice' creado exitosamente"
+                if [ "$SCRIPT_LANGUAGE" = "en" ]; then
+                    show_message "✅ Dataset '$pool_name/$dataset_choice' created successfully"
+                else
+                    show_message "✅ Dataset '$pool_name/$dataset_choice' creado exitosamente"
+                fi
                 
                 # Configurar montaje
                 sudo zfs set mountpoint="/$pool_name/$dataset_choice" "$pool_name/$dataset_choice"
@@ -1692,26 +2150,52 @@ create_datasets_in_pool() {
                         2) sudo zfs set compression=gzip "$pool_name/$dataset_choice";;
                         3) sudo zfs set compression=off "$pool_name/$dataset_choice";;
                     esac
-                    show_message "  🗜️  Compresión configurada"
+                    if [ "$SCRIPT_LANGUAGE" = "en" ]; then
+                        show_message "  🗜️  Compression configured"
+                    else
+                        show_message "  🗜️  Compresión configurada"
+                    fi
                 fi
                 
-                if confirm "¿Establecer cuota de espacio?"; then
-                    read -p "Cuota en GB (ej: 100): " quota_gb
-                    if [[ "$quota_gb" =~ ^[0-9]+$ ]] && [ "$quota_gb" -gt 0 ]; then
-                        sudo zfs set quota="${quota_gb}G" "$pool_name/$dataset_choice"
-                        show_message "  📏 Cuota establecida: ${quota_gb}GB"
+                if [ "$SCRIPT_LANGUAGE" = "en" ]; then
+                    if confirm "Set space quota?"; then
+                        read -p "Quota in GB (e.g., 100): " quota_gb
+                        if [[ "$quota_gb" =~ ^[0-9]+$ ]] && [ "$quota_gb" -gt 0 ]; then
+                            sudo zfs set quota="${quota_gb}G" "$pool_name/$dataset_choice"
+                            show_message "  📏 Quota set: ${quota_gb}GB"
+                        fi
+                    fi
+                else
+                    if confirm "¿Establecer cuota de espacio?"; then
+                        read -p "Cuota en GB (ej: 100): " quota_gb
+                        if [[ "$quota_gb" =~ ^[0-9]+$ ]] && [ "$quota_gb" -gt 0 ]; then
+                            sudo zfs set quota="${quota_gb}G" "$pool_name/$dataset_choice"
+                            show_message "  📏 Cuota establecida: ${quota_gb}GB"
+                        fi
                     fi
                 fi
                 
             else
-                show_error "❌ Error creando dataset '$pool_name/$dataset_choice'"
+                if [ "$SCRIPT_LANGUAGE" = "en" ]; then
+                    show_error "❌ Error creating dataset '$pool_name/$dataset_choice'"
+                else
+                    show_error "❌ Error creando dataset '$pool_name/$dataset_choice'"
+                fi
             fi
             
         else
             if [ -z "$dataset_choice" ]; then
-                show_error "❌ El nombre del dataset no puede estar vacío"
+                if [ "$SCRIPT_LANGUAGE" = "en" ]; then
+                    show_error "❌ Dataset name cannot be empty"
+                else
+                    show_error "❌ El nombre del dataset no puede estar vacío"
+                fi
             else
-                show_error "❌ Nombre inválido. Usa solo letras, números, guiones y guiones bajos"
+                if [ "$SCRIPT_LANGUAGE" = "en" ]; then
+                    show_error "❌ Invalid name. Use only letters, numbers, hyphens and underscores"
+                else
+                    show_error "❌ Nombre inválido. Usa solo letras, números, guiones y guiones bajos"
+                fi
             fi
         fi
         
@@ -1721,7 +2205,11 @@ create_datasets_in_pool() {
     # Mostrar resumen de datasets creados en esta sesión
     if [ ${#datasets_created[@]} -gt 0 ]; then
         echo ""
-        show_message "📊 RESUMEN DE DATASETS CREADOS EN ESTA SESIÓN:"
+        if [ "$SCRIPT_LANGUAGE" = "en" ]; then
+            show_message "📊 SUMMARY OF DATASETS CREATED IN THIS SESSION:"
+        else
+            show_message "📊 RESUMEN DE DATASETS CREADOS EN ESTA SESIÓN:"
+        fi
         for dataset in "${datasets_created[@]}"; do
             local mountpoint=$(zfs get -H -o value mountpoint "$pool_name/$dataset" 2>/dev/null)
             local compression=$(zfs get -H -o value compression "$pool_name/$dataset" 2>/dev/null)
@@ -1884,17 +2372,29 @@ destroy_zfs_pool_safely() {
     local force="${2:-false}"
     
     if [ -z "$pool_name" ]; then
-        show_error "Nombre de pool ZFS no especificado"
+        if [ "$SCRIPT_LANGUAGE" = "en" ]; then
+            show_error "ZFS pool name not specified"
+        else
+            show_error "Nombre de pool ZFS no especificado"
+        fi
         return 1
     fi
     
     # Verificar que el pool existe
     if ! zpool list -H -o name 2>/dev/null | grep -q "^${pool_name}$"; then
-        show_warning "Pool ZFS '$pool_name' no encontrado"
+        if [ "$SCRIPT_LANGUAGE" = "en" ]; then
+            show_warning "ZFS pool '$pool_name' not found"
+        else
+            show_warning "Pool ZFS '$pool_name' no encontrado"
+        fi
         return 0
     fi
     
-    show_warning "🗑️  Preparando eliminación del pool ZFS: '$pool_name'"
+    if [ "$SCRIPT_LANGUAGE" = "en" ]; then
+        show_warning "🗑️  Preparing deletion of ZFS pool: '$pool_name'"
+    else
+        show_warning "🗑️  Preparando eliminación del pool ZFS: '$pool_name'"
+    fi
     
     # Mostrar información del pool antes de eliminar
     local pool_size=$(zpool list -H -o size "$pool_name" 2>/dev/null)
@@ -1925,42 +2425,81 @@ destroy_zfs_pool_safely() {
     fi
     
     echo ""
-    show_warning "⚠️  ESTA ACCIÓN ELIMINARÁ PERMANENTEMENTE:"
-    show_warning "    • El pool ZFS '$pool_name' completo"
-    show_warning "    • Todos los datasets y sus datos"
-    show_warning "    • Todos los snapshots"
-    show_warning "    • Configuración de montaje automático"
+    if [ "$SCRIPT_LANGUAGE" = "en" ]; then
+        show_warning "⚠️  THIS ACTION WILL PERMANENTLY DELETE:"
+        show_warning "    • The complete ZFS pool '$pool_name'"
+        show_warning "    • All datasets and their data"
+        show_warning "    • All snapshots"
+        show_warning "    • Automatic mount configuration"
+    else
+        show_warning "⚠️  ESTA ACCIÓN ELIMINARÁ PERMANENTEMENTE:"
+        show_warning "    • El pool ZFS '$pool_name' completo"
+        show_warning "    • Todos los datasets y sus datos"
+        show_warning "    • Todos los snapshots"
+        show_warning "    • Configuración de montaje automático"
+    fi
     echo ""
     
     if [ "$force" != "true" ]; then
-        if ! confirm "¿Estás COMPLETAMENTE SEGURO de eliminar el pool '$pool_name'?"; then
-            show_message "Eliminación cancelada por el usuario"
-            return 1
+        if [ "$SCRIPT_LANGUAGE" = "en" ]; then
+            if ! confirm "Are you COMPLETELY SURE to delete pool '$pool_name'?"; then
+                show_message "Deletion cancelled by user"
+                return 1
+            fi
+        else
+            if ! confirm "¿Estás COMPLETAMENTE SEGURO de eliminar el pool '$pool_name'?"; then
+                show_message "Eliminación cancelada por el usuario"
+                return 1
+            fi
         fi
     fi
     
     # Proceder con la eliminación
-    show_message "🔄 Eliminando pool ZFS '$pool_name'..."
+    if [ "$SCRIPT_LANGUAGE" = "en" ]; then
+        show_message "🔄 Deleting ZFS pool '$pool_name'..."
+    else
+        show_message "🔄 Eliminando pool ZFS '$pool_name'..."
+    fi
     
-    # 1. Desmontار todos los datasets
+    # 1. Desmontार todos los datasets
     if [ -n "$datasets" ]; then
-        show_message "Desmontando datasets..."
+        if [ "$SCRIPT_LANGUAGE" = "en" ]; then
+            show_message "Unmounting datasets..."
+        else
+            show_message "Desmontando datasets..."
+        fi
         for dataset in $datasets; do
             sudo zfs unmount "$dataset" 2>/dev/null || true
         done
     fi
     
     # 2. Intentar exportar el pool primero
-    show_message "Exportando pool..."
+    if [ "$SCRIPT_LANGUAGE" = "en" ]; then
+        show_message "Exporting pool..."
+    else
+        show_message "Exportando pool..."
+    fi
     sudo zpool export "$pool_name" 2>/dev/null || true
     sleep 1
     
     # 3. Destruir el pool
-    show_message "Destruyendo pool..."
-    if sudo zpool destroy -f "$pool_name" 2>/dev/null; then
-        show_message "✅ Pool ZFS '$pool_name' eliminado exitosamente"
+    if [ "$SCRIPT_LANGUAGE" = "en" ]; then
+        show_message "Destroying pool..."
     else
-        show_warning "⚠️  Intento estándar falló, forzando eliminación..."
+        show_message "Destruyendo pool..."
+    fi
+    if sudo zpool destroy -f "$pool_name" 2>/dev/null; then
+        if [ "$SCRIPT_LANGUAGE" = "en" ]; then
+            show_message "✅ ZFS pool '$pool_name' deleted successfully"
+        else
+            show_message "✅ Pool ZFS '$pool_name' eliminado exitosamente"
+        fi
+    else
+        if [ "$SCRIPT_LANGUAGE" = "en" ]; then
+            show_warning "⚠️  Standard attempt failed, forcing deletion..."
+        else
+            show_warning "⚠️  Intento estándar falló, forzando eliminación..."
+        fi
         
         # Intentar importar y destruir forzadamente
         sudo zpool import "$pool_name" 2>/dev/null || true
@@ -1975,7 +2514,11 @@ destroy_zfs_pool_safely() {
     fi
     
     # 4. Limpiar referencias en servicios de sistema
-    show_message "Limpiando configuración del sistema..."
+    if [ "$SCRIPT_LANGUAGE" = "en" ]; then
+        show_message "Cleaning system configuration..."
+    else
+        show_message "Limpiando configuración del sistema..."
+    fi
     
     # Limpiar cache de zpool
     sudo rm -f /etc/zfs/zpool.cache 2>/dev/null || true
@@ -1998,11 +2541,19 @@ destroy_btrfs_safely() {
     
     # Verificar que es BTRFS
     if ! btrfs filesystem show "/dev/$disk" 2>/dev/null | grep -q "uuid:"; then
-        show_warning "No se encontró filesystem BTRFS en /dev/$disk"
+        if [ "$SCRIPT_LANGUAGE" = "en" ]; then
+            show_warning "No BTRFS filesystem found on /dev/$disk"
+        else
+            show_warning "No se encontró filesystem BTRFS en /dev/$disk"
+        fi
         return 0
     fi
     
-    show_warning "🗑️  Preparando eliminación del filesystem BTRFS en: /dev/$disk"
+    if [ "$SCRIPT_LANGUAGE" = "en" ]; then
+        show_warning "🗑️  Preparing deletion of BTRFS filesystem on: /dev/$disk"
+    else
+        show_warning "🗑️  Preparando eliminación del filesystem BTRFS en: /dev/$disk"
+    fi
     
     # Obtener información del filesystem
     local btrfs_uuid=$(btrfs filesystem show "/dev/$disk" 2>/dev/null | grep "uuid:" | awk '{print $4}')
@@ -2027,25 +2578,47 @@ destroy_btrfs_safely() {
     fi
     
     echo ""
-    show_warning "⚠️  ESTA ACCIÓN ELIMINARÁ PERMANENTEMENTE:"
-    show_warning "    • El filesystem BTRFS completo en /dev/$disk"
-    show_warning "    • Todos los datos y subvolúmenes"
-    show_warning "    • Entradas de montaje automático en /etc/fstab"
+    if [ "$SCRIPT_LANGUAGE" = "en" ]; then
+        show_warning "⚠️  THIS ACTION WILL PERMANENTLY DELETE:"
+        show_warning "    • The complete BTRFS filesystem on /dev/$disk"
+        show_warning "    • All data and subvolumes"
+        show_warning "    • Automatic mount entries in /etc/fstab"
+    else
+        show_warning "⚠️  ESTA ACCIÓN ELIMINARÁ PERMANENTEMENTE:"
+        show_warning "    • El filesystem BTRFS completo en /dev/$disk"
+        show_warning "    • Todos los datos y subvolúmenes"
+        show_warning "    • Entradas de montaje automático en /etc/fstab"
+    fi
     echo ""
     
     if [ "$force" != "true" ]; then
-        if ! confirm "¿Estás COMPLETAMENTE SEGURO de eliminar el BTRFS en /dev/$disk?"; then
-            show_message "Eliminación cancelada por el usuario"
-            return 1
+        if [ "$SCRIPT_LANGUAGE" = "en" ]; then
+            if ! confirm "Are you COMPLETELY SURE to delete BTRFS on /dev/$disk?"; then
+                show_message "Deletion cancelled by user"
+                return 1
+            fi
+        else
+            if ! confirm "¿Estás COMPLETAMENTE SEGURO de eliminar el BTRFS en /dev/$disk?"; then
+                show_message "Eliminación cancelada por el usuario"
+                return 1
+            fi
         fi
     fi
     
     # Proceder con la eliminación
-    show_message "🔄 Eliminando filesystem BTRFS en /dev/$disk..."
+    if [ "$SCRIPT_LANGUAGE" = "en" ]; then
+        show_message "🔄 Deleting BTRFS filesystem on /dev/$disk..."
+    else
+        show_message "🔄 Eliminando filesystem BTRFS en /dev/$disk..."
+    fi
     
     # 1. Desmontar el filesystem
     if [ -n "$mount_point" ]; then
-        show_message "Desmontando $mount_point..."
+        if [ "$SCRIPT_LANGUAGE" = "en" ]; then
+            show_message "Unmounting $mount_point..."
+        else
+            show_message "Desmontando $mount_point..."
+        fi
         sudo umount "$mount_point" 2>/dev/null || sudo umount -f "$mount_point" 2>/dev/null || true
     fi
     
@@ -2053,12 +2626,20 @@ destroy_btrfs_safely() {
     sudo umount "/dev/$disk"* 2>/dev/null || true
     
     # 2. Eliminar entradas de /etc/fstab específicas de BTRFS de forma segura
-    show_message "Eliminando entradas BTRFS de /etc/fstab..."
+    if [ "$SCRIPT_LANGUAGE" = "en" ]; then
+        show_message "Removing BTRFS entries from /etc/fstab..."
+    else
+        show_message "Eliminando entradas BTRFS de /etc/fstab..."
+    fi
     if [ -n "$btrfs_uuid" ]; then
         # Crear backup de fstab con timestamp
         local backup_file="/etc/fstab.backup.$(date +%Y%m%d-%H%M%S)"
         sudo cp /etc/fstab "$backup_file" 2>/dev/null || true
-        show_message "📋 Backup de fstab creado: $backup_file"
+        if [ "$SCRIPT_LANGUAGE" = "en" ]; then
+            show_message "📋 fstab backup created: $backup_file"
+        else
+            show_message "📋 Backup de fstab creado: $backup_file"
+        fi
         
         # Verificar qué entradas existen antes de eliminar
         local existing_entries=$(grep -E "UUID=$btrfs_uuid" /etc/fstab 2>/dev/null | grep -i btrfs || true)
@@ -2108,10 +2689,18 @@ destroy_btrfs_safely() {
     fi
     
     # 3. Limpiar metadatos BTRFS
-    show_message "Limpiando metadatos BTRFS..."
+    if [ "$SCRIPT_LANGUAGE" = "en" ]; then
+        show_message "Cleaning BTRFS metadata..."
+    else
+        show_message "Limpiando metadatos BTRFS..."
+    fi
     sudo wipefs -af "/dev/$disk" 2>/dev/null || true
     
-    show_message "✅ Filesystem BTRFS en /dev/$disk eliminado exitosamente"
+    if [ "$SCRIPT_LANGUAGE" = "en" ]; then
+        show_message "✅ BTRFS filesystem on /dev/$disk deleted successfully"
+    else
+        show_message "✅ Filesystem BTRFS en /dev/$disk eliminado exitosamente"
+    fi
     return 0
 }
 
@@ -2121,11 +2710,19 @@ destroy_btrfs_array_safely() {
     local array_uuid="$2"
     
     if [ -z "$primary_disk" ] || [ -z "$array_uuid" ]; then
-        show_error "Parámetros incorrectos para eliminación de array BTRFS"
+        if [ "$SCRIPT_LANGUAGE" = "en" ]; then
+            show_error "Incorrect parameters for BTRFS array deletion"
+        else
+            show_error "Parámetros incorrectos para eliminación de array BTRFS"
+        fi
         return 1
     fi
     
-    show_warning "🗑️  Eliminando array BTRFS completo (UUID: $array_uuid)"
+    if [ "$SCRIPT_LANGUAGE" = "en" ]; then
+        show_warning "🗑️  Deleting complete BTRFS array (UUID: $array_uuid)"
+    else
+        show_warning "🗑️  Eliminando array BTRFS completo (UUID: $array_uuid)"
+    fi
     
     # Obtener información completa del array
     local btrfs_info=$(sudo btrfs filesystem show "/dev/$primary_disk" 2>/dev/null)
@@ -2144,20 +2741,38 @@ destroy_btrfs_array_safely() {
     if [ -n "$mount_point" ]; then
         raid_profile=$(sudo btrfs filesystem usage "$mount_point" 2>/dev/null | grep "Data," | head -1 | awk '{print $1}' | cut -d',' -f2 | cut -d':' -f1)
         if [ -n "$raid_profile" ]; then
-            echo "   🔧 Configuración RAID: $raid_profile"
+            if [ "$SCRIPT_LANGUAGE" = "en" ]; then
+                echo "   🔧 RAID Configuration: $raid_profile"
+            else
+                echo "   🔧 Configuración RAID: $raid_profile"
+            fi
         fi
     fi
     
     echo ""
-    show_warning "⚠️  ESTA ACCIÓN ELIMINARÁ PERMANENTEMENTE:"
-    show_warning "    • Todo el array BTRFS ($total_devices dispositivos)"
-    show_warning "    • Todos los datos y subvolúmenes"
-    show_warning "    • Entradas de montaje automático en /etc/fstab"
+    if [ "$SCRIPT_LANGUAGE" = "en" ]; then
+        show_warning "⚠️  THIS ACTION WILL PERMANENTLY DELETE:"
+        show_warning "    • The entire BTRFS array ($total_devices devices)"
+        show_warning "    • All data and subvolumes"
+        show_warning "    • Automatic mount entries in /etc/fstab"
+    else
+        show_warning "⚠️  ESTA ACCIÓN ELIMINARÁ PERMANENTEMENTE:"
+        show_warning "    • Todo el array BTRFS ($total_devices dispositivos)"
+        show_warning "    • Todos los datos y subvolúmenes"
+        show_warning "    • Entradas de montaje automático en /etc/fstab"
+    fi
     echo ""
     
-    if ! confirm "¿Estás COMPLETAMENTE SEGURO de eliminar este array BTRFS completo?"; then
-        show_message "Eliminación cancelada por el usuario"
-        return 1
+    if [ "$SCRIPT_LANGUAGE" = "en" ]; then
+        if ! confirm "Are you COMPLETELY SURE to delete this complete BTRFS array?"; then
+            show_message "Deletion cancelled by user"
+            return 1
+        fi
+    else
+        if ! confirm "¿Estás COMPLETAMENTE SEGURO de eliminar este array BTRFS completo?"; then
+            show_message "Eliminación cancelada por el usuario"
+            return 1
+        fi
     fi
     
     # Proceder con la eliminación del array completo
@@ -2178,7 +2793,11 @@ destroy_btrfs_array_safely() {
     show_message "Eliminando entradas del array BTRFS de /etc/fstab..."
     local backup_file="/etc/fstab.backup.$(date +%Y%m%d-%H%M%S)"
     sudo cp /etc/fstab "$backup_file" 2>/dev/null || true
-    show_message "📋 Backup de fstab creado: $backup_file"
+    if [ "$SCRIPT_LANGUAGE" = "en" ]; then
+        show_message "📋 fstab backup created: $backup_file"
+    else
+        show_message "📋 Backup de fstab creado: $backup_file"
+    fi
     
     # Verificar entradas existentes
     local existing_entries=$(grep -E "UUID=$array_uuid" /etc/fstab 2>/dev/null | grep -i btrfs || true)
@@ -2204,14 +2823,27 @@ destroy_btrfs_array_safely() {
     fi
     
     # 3. Limpiar metadatos BTRFS de todos los dispositivos
-    show_message "Limpiando metadatos BTRFS de todos los dispositivos..."
+    if [ "$SCRIPT_LANGUAGE" = "en" ]; then
+        show_message "Cleaning BTRFS metadata from all devices..."
+    else
+        show_message "Limpiando metadatos BTRFS de todos los dispositivos..."
+    fi
     for device in $all_devices; do
-        show_message "  Limpiando /dev/$device..."
+        if [ "$SCRIPT_LANGUAGE" = "en" ]; then
+            show_message "  Cleaning /dev/$device..."
+        else
+            show_message "  Limpiando /dev/$device..."
+        fi
         sudo wipefs -af "/dev/$device" 2>/dev/null || true
     done
     
-    show_message "✅ Array BTRFS completo eliminado exitosamente"
-    show_message "   📀 Dispositivos limpiados: $all_devices"
+    if [ "$SCRIPT_LANGUAGE" = "en" ]; then
+        show_message "✅ Complete BTRFS array deleted successfully"
+        show_message "   📀 Devices cleaned: $all_devices"
+    else
+        show_message "✅ Array BTRFS completo eliminado exitosamente"
+        show_message "   📀 Dispositivos limpiados: $all_devices"
+    fi
     return 0
 }
 
@@ -2219,17 +2851,29 @@ destroy_btrfs_array_safely() {
 clean_disk() {
     local disk="$1"
     
-    show_message "Limpiando disco /dev/$disk..."
+    if [ "$SCRIPT_LANGUAGE" = "en" ]; then
+        show_message "Cleaning disk /dev/$disk..."
+    else
+        show_message "Limpiando disco /dev/$disk..."
+    fi
     
     # Desmontar si está montado
     if mount | grep -q "/dev/$disk"; then
-        show_message "Desmontando /dev/$disk..."
+        if [ "$SCRIPT_LANGUAGE" = "en" ]; then
+            show_message "Unmounting /dev/$disk..."
+        else
+            show_message "Desmontando /dev/$disk..."
+        fi
         sudo umount "/dev/$disk"* 2>/dev/null || true
     fi
     
     # Verificar y destruir pools ZFS que usen este disco
     if command -v zpool &> /dev/null; then
-        show_message "Verificando pools ZFS que usan /dev/$disk..."
+        if [ "$SCRIPT_LANGUAGE" = "en" ]; then
+            show_message "Checking ZFS pools using /dev/$disk..."
+        else
+            show_message "Verificando pools ZFS que usan /dev/$disk..."
+        fi
         
         # Obtener lista de todos los pools
         local all_pools=$(zpool list -H -o name 2>/dev/null)
@@ -2261,15 +2905,25 @@ clean_disk() {
         # Destruir pools encontrados usando la función segura
         for pool in "${unique_pools[@]}"; do
             if [ -n "$pool" ]; then
-                show_warning "🗑️  Detectado pool ZFS '$pool' usando el disco /dev/$disk"
+                if [ "$SCRIPT_LANGUAGE" = "en" ]; then
+                    show_warning "🗑️  Detected ZFS pool '$pool' using disk /dev/$disk"
+                else
+                    show_warning "🗑️  Detectado pool ZFS '$pool' usando el disco /dev/$disk"
+                fi
                 
                 # Usar la función de eliminación segura
                 if ! destroy_zfs_pool_safely "$pool" "true"; then
-                    show_error "❌ Error eliminando el pool '$pool'"
-                    show_message "Continuando con limpieza manual..."
+                    if [ "$SCRIPT_LANGUAGE" = "en" ]; then
+                        show_error "❌ Error deleting pool '$pool'"
+                        show_message "Continuing with manual cleanup..."
+                        show_warning "⚠️  Trying emergency method..."
+                    else
+                        show_error "❌ Error eliminando el pool '$pool'"
+                        show_message "Continuando con limpieza manual..."
+                        show_warning "⚠️  Intentando método de emergencia..."
+                    fi
                     
                     # Fallback a método anterior si la función segura falla
-                    show_warning "⚠️  Intentando método de emergencia..."
                     sudo zpool export "$pool" 2>/dev/null || true
                     sleep 1
                     sudo zpool destroy -f "$pool" 2>/dev/null || true
@@ -2291,12 +2945,21 @@ clean_disk() {
     # Verificar y limpiar BTRFS usando la función segura
     if command -v btrfs &> /dev/null; then
         if btrfs filesystem show "/dev/$disk" 2>/dev/null | grep -q "uuid:"; then
-            show_warning "🗑️  Detectado filesystem BTRFS en /dev/$disk"
+            if [ "$SCRIPT_LANGUAGE" = "en" ]; then
+                show_warning "🗑️  Detected BTRFS filesystem on /dev/$disk"
+            else
+                show_warning "🗑️  Detectado filesystem BTRFS en /dev/$disk"
+            fi
             
             # Usar la función de eliminación segura para BTRFS
             if ! destroy_btrfs_safely "$disk" "true"; then
-                show_error "❌ Error eliminando filesystem BTRFS"
-                show_message "Continuando con limpieza manual..."
+                if [ "$SCRIPT_LANGUAGE" = "en" ]; then
+                    show_error "❌ Error deleting BTRFS filesystem"
+                    show_message "Continuing with manual cleanup..."
+                else
+                    show_error "❌ Error eliminando filesystem BTRFS"
+                    show_message "Continuando con limpieza manual..."
+                fi
                 
                 # Fallback a limpieza básica
                 sudo wipefs -a "/dev/$disk" 2>/dev/null || true
@@ -2315,7 +2978,11 @@ clean_disk() {
     fi
     
     # Limpiar tabla de particiones y metadatos completamente
-    show_message "🧹 Limpiando tabla de particiones y metadatos de /dev/$disk..."
+    if [ "$SCRIPT_LANGUAGE" = "en" ]; then
+        show_message "🧹 Cleaning partition table and metadata from /dev/$disk..."
+    else
+        show_message "🧹 Limpiando tabla de particiones y metadatos de /dev/$disk..."
+    fi
     
     # Limpiar los primeros 100MB y los últimos 100MB del disco
     sudo dd if=/dev/zero of="/dev/$disk" bs=1M count=100 2>/dev/null || true
@@ -2337,12 +3004,20 @@ clean_disk() {
     # Esperar un poco más para que el sistema reconozca los cambios
     sleep 3
     
-    show_message "✅ Disco /dev/$disk limpiado completamente"
+    if [ "$SCRIPT_LANGUAGE" = "en" ]; then
+        show_message "✅ Disk /dev/$disk completely cleaned"
+    else
+        show_message "✅ Disco /dev/$disk limpiado completamente"
+    fi
 }
 
 # Función para detectar discos disponibles
 detect_disks() {
-    show_title "Detectando discos disponibles"
+    if [ "$SCRIPT_LANGUAGE" = "en" ]; then
+        show_title "Detecting available disks"
+    else
+        show_title "Detectando discos disponibles"
+    fi
     
     # Obtener lista de discos, excluyendo dispositivos del sistema
     AVAILABLE_DISKS=()
@@ -2371,7 +3046,11 @@ detect_disks() {
         fi
     done < <(findmnt -rn -o SOURCE,TARGET | grep -E "^/dev/")
     
-    show_message "📋 Discos del sistema excluidos: ${SYSTEM_DISKS[*]}"
+    if [ "$SCRIPT_LANGUAGE" = "en" ]; then
+        show_message "📋 System disks excluded: ${SYSTEM_DISKS[*]}"
+    else
+        show_message "📋 Discos del sistema excluidos: ${SYSTEM_DISKS[*]}"
+    fi
     
     while IFS= read -r disk; do
         # Excluir discos del sistema, dispositivos loop, y particiones
@@ -2390,11 +3069,19 @@ detect_disks() {
     done < <(lsblk -dpno NAME | sed 's|/dev/||' | grep -v '^$')
     
     if [ ${#AVAILABLE_DISKS[@]} -eq 0 ]; then
-        show_error "No se encontraron discos disponibles para RAID"
+        if [ "$SCRIPT_LANGUAGE" = "en" ]; then
+            show_error "No available disks found for RAID"
+        else
+            show_error "No se encontraron discos disponibles para RAID"
+        fi
         exit 1
     fi
     
-    show_message "Discos encontrados:"
+    if [ "$SCRIPT_LANGUAGE" = "en" ]; then
+        show_message "Found disks:"
+    else
+        show_message "Discos encontrados:"
+    fi
     local disks_with_raid=false
     
     for i in "${!AVAILABLE_DISKS[@]}"; do
@@ -2404,22 +3091,41 @@ detect_disks() {
         status="${DISK_RAID_STATUS[$i]}"
         
         if [ -n "$status" ]; then
-            echo -e "  $((i+1)). ${AVAILABLE_DISKS[$i]} - $size - $model ${RED}[EN USO: $status]${NC}"
+            if [ "$SCRIPT_LANGUAGE" = "en" ]; then
+                echo -e "  $((i+1)). ${AVAILABLE_DISKS[$i]} - $size - $model ${RED}[IN USE: $status]${NC}"
+            else
+                echo -e "  $((i+1)). ${AVAILABLE_DISKS[$i]} - $size - $model ${RED}[EN USO: $status]${NC}"
+            fi
             disks_with_raid=true
         else
-            echo "  $((i+1)). ${AVAILABLE_DISKS[$i]} - $size - $model [LIBRE]"
+            if [ "$SCRIPT_LANGUAGE" = "en" ]; then
+                echo "  $((i+1)). ${AVAILABLE_DISKS[$i]} - $size - $model [FREE]"
+            else
+                echo "  $((i+1)). ${AVAILABLE_DISKS[$i]} - $size - $model [LIBRE]"
+            fi
         fi
     done
     
     # Si hay discos en RAID existentes, preguntar al usuario
     if [ "$disks_with_raid" = true ]; then
-        show_warning "¡ATENCIÓN! Algunos discos están siendo utilizados en configuraciones RAID existentes."
-        show_warning "Si continúas, tendrás la opción de limpiar estos discos antes de crear el nuevo RAID."
-        show_warning "Esto DESTRUIRÁ todos los datos en esos discos."
-        
-        if ! confirm "¿Deseas continuar con la configuración?"; then
-            show_message "Configuración cancelada por el usuario"
-            exit 0
+        if [ "$SCRIPT_LANGUAGE" = "en" ]; then
+            show_warning "ATTENTION! Some disks are being used in existing RAID configurations."
+            show_warning "If you continue, you will have the option to clean these disks before creating the new RAID."
+            show_warning "This will DESTROY all data on those disks."
+            
+            if ! confirm "Do you want to continue with the configuration?"; then
+                show_message "Configuration cancelled by user"
+                exit 0
+            fi
+        else
+            show_warning "¡ATENCIÓN! Algunos discos están siendo utilizados en configuraciones RAID existentes."
+            show_warning "Si continúas, tendrás la opción de limpiar estos discos antes de crear el nuevo RAID."
+            show_warning "Esto DESTRUIRÁ todos los datos en esos discos."
+            
+            if ! confirm "¿Deseas continuar con la configuración?"; then
+                show_message "Configuración cancelada por el usuario"
+                exit 0
+            fi
         fi
     fi
     
@@ -2436,17 +3142,30 @@ detect_disks() {
 
 # Función para seleccionar tipo de filesystem
 select_filesystem() {
-    show_title "Selección de Sistema de Archivos"
-    echo "Selecciona el tipo de sistema de archivos RAID:"
+    if [ "$SCRIPT_LANGUAGE" = "en" ]; then
+        show_title "Filesystem Selection"
+        echo "Select the type of RAID filesystem:"
+    else
+        show_title "Selección de Sistema de Archivos"
+        echo "Selecciona el tipo de sistema de archivos RAID:"
+    fi
     echo "1. BTRFS"
     echo "2. ZFS"
     
     while true; do
-        read -p "Selecciona una opción (1-2): " choice
+        if [ "$SCRIPT_LANGUAGE" = "en" ]; then
+            read -p "Select an option (1-2): " choice
+        else
+            read -p "Selecciona una opción (1-2): " choice
+        fi
         case $choice in
             1)
                 FILESYSTEM_TYPE="btrfs"
-                show_warning "NOTA: En BTRFS, RAID 5/6 aún es experimental"
+                if [ "$SCRIPT_LANGUAGE" = "en" ]; then
+                    show_warning "NOTE: In BTRFS, RAID 5/6 is still experimental"
+                else
+                    show_warning "NOTA: En BTRFS, RAID 5/6 aún es experimental"
+                fi
                 break
                 ;;
             2)
@@ -2454,7 +3173,11 @@ select_filesystem() {
                 break
                 ;;
             *)
-                echo "Opción inválida. Por favor selecciona 1 o 2."
+                if [ "$SCRIPT_LANGUAGE" = "en" ]; then
+                    echo "Invalid option. Please select 1 or 2."
+                else
+                    echo "Opción inválida. Por favor selecciona 1 o 2."
+                fi
                 ;;
         esac
     done
@@ -2463,14 +3186,30 @@ select_filesystem() {
 # Función para mostrar tipos de RAID
 show_raid_types() {
     if [ "$FILESYSTEM_TYPE" = "btrfs" ]; then
-        echo "Tipos de RAID disponibles en BTRFS:"
+        if [ "$SCRIPT_LANGUAGE" = "en" ]; then
+            echo "Available BTRFS RAID types:"
+        else
+            if [ "$SCRIPT_LANGUAGE" = "en" ]; then
+                echo "Available RAID types in BTRFS:"
+            else
+                echo "Tipos de RAID disponibles en BTRFS:"
+            fi
+        fi
         echo "1. RAID 0 (stripe) - No redundancy, maximum performance and capacity"
         echo "2. RAID 1 (mirror) - Data mirrored across drives, 50% capacity"
         echo "3. RAID 5 - Single drive fault tolerance with parity (EXPERIMENTAL)"
         echo "4. RAID 6 - Dual drive fault tolerance with parity (EXPERIMENTAL)"
         echo "5. RAID 10 - Combination of RAID 0 and 1, requires 4+ drives"
     else
-        echo "Tipos de RAID disponibles en ZFS:"
+        if [ "$SCRIPT_LANGUAGE" = "en" ]; then
+            echo "Available ZFS RAID types:"
+        else
+            if [ "$SCRIPT_LANGUAGE" = "en" ]; then
+                echo "Available RAID types in ZFS:"
+            else
+                echo "Tipos de RAID disponibles en ZFS:"
+            fi
+        fi
         echo "1. Stripe - No redundancy, maximum performance"
         echo "2. Mirror - Data mirrored across drives"
         echo "3. RAIDZ1 - Single parity, equivalent to RAID 5"
@@ -2602,39 +3341,75 @@ show_raid_preview() {
     case "$raid_type" in
         "raid0"|"stripe")
             usable_gb=$total_raw_gb
-            redundancy_level="❌ SIN REDUNDANCIA"
-            failure_tolerance="⚠️  Fallo de 1 disco = PÉRDIDA TOTAL"
-            performance_note="🚀 Máximo rendimiento (lectura y escritura)"
+            if [ "$SCRIPT_LANGUAGE" = "en" ]; then
+                redundancy_level="❌ NO REDUNDANCY"
+                failure_tolerance="⚠️  1 disk failure = TOTAL LOSS"
+                performance_note="🚀 Maximum performance (read and write)"
+            else
+                redundancy_level="❌ SIN REDUNDANCIA"
+                failure_tolerance="⚠️  Fallo de 1 disco = PÉRDIDA TOTAL"
+                performance_note="🚀 Máximo rendimiento (lectura y escritura)"
+            fi
             ;;
         "raid1"|"mirror")
             usable_gb=$min_size_gb
-            redundancy_level="✅ ESPEJO COMPLETO"
-            failure_tolerance="✅ Tolera fallo de hasta $((num_disks-1)) disco(s)"
-            performance_note="⚡ Buen rendimiento de lectura, escritura normal"
+            if [ "$SCRIPT_LANGUAGE" = "en" ]; then
+                redundancy_level="✅ FULL MIRROR"
+                failure_tolerance="✅ Tolerates failure of up to $((num_disks-1)) disk(s)"
+                performance_note="⚡ Good read performance, normal write"
+            else
+                redundancy_level="✅ ESPEJO COMPLETO"
+                failure_tolerance="✅ Tolera fallo de hasta $((num_disks-1)) disco(s)"
+                performance_note="⚡ Buen rendimiento de lectura, escritura normal"
+            fi
             ;;
         "raid5"|"raidz1")
             usable_gb=$((min_size_gb * (num_disks - 1)))
-            redundancy_level="✅ PARIDAD SIMPLE"
-            failure_tolerance="✅ Tolera fallo de 1 disco"
-            performance_note="⚡ Buen rendimiento balanceado"
+            if [ "$SCRIPT_LANGUAGE" = "en" ]; then
+                redundancy_level="✅ SINGLE PARITY"
+                failure_tolerance="✅ Tolerates 1 disk failure"
+                performance_note="⚡ Good balanced performance"
+            else
+                redundancy_level="✅ PARIDAD SIMPLE"
+                failure_tolerance="✅ Tolera fallo de 1 disco"
+                performance_note="⚡ Buen rendimiento balanceado"
+            fi
             ;;
         "raid6"|"raidz2")
             usable_gb=$((min_size_gb * (num_disks - 2)))
-            redundancy_level="✅ PARIDAD DOBLE"
-            failure_tolerance="✅ Tolera fallo de hasta 2 discos"
-            performance_note="⚡ Rendimiento moderado"
+            if [ "$SCRIPT_LANGUAGE" = "en" ]; then
+                redundancy_level="✅ DOUBLE PARITY"
+                failure_tolerance="✅ Tolerates up to 2 disk failures"
+                performance_note="⚡ Moderate performance"
+            else
+                redundancy_level="✅ PARIDAD DOBLE"
+                failure_tolerance="✅ Tolera fallo de hasta 2 discos"
+                performance_note="⚡ Rendimiento moderado"
+            fi
             ;;
         "raid10")
             usable_gb=$((min_size_gb * (num_disks / 2)))
-            redundancy_level="✅ ESPEJO + STRIPING"
-            failure_tolerance="✅ Tolera fallo de 1 disco por espejo"
-            performance_note="🚀 Alto rendimiento (lectura y escritura)"
+            if [ "$SCRIPT_LANGUAGE" = "en" ]; then
+                redundancy_level="✅ MIRROR + STRIPING"
+                failure_tolerance="✅ Tolerates 1 disk failure per mirror"
+                performance_note="🚀 High performance (read and write)"
+            else
+                redundancy_level="✅ ESPEJO + STRIPING"
+                failure_tolerance="✅ Tolera fallo de 1 disco por espejo"
+                performance_note="🚀 Alto rendimiento (lectura y escritura)"
+            fi
             ;;
         "raidz3")
             usable_gb=$((min_size_gb * (num_disks - 3)))
-            redundancy_level="✅ PARIDAD TRIPLE"
-            failure_tolerance="✅ Tolera fallo de hasta 3 discos"
-            performance_note="⚡ Rendimiento conservador"
+            if [ "$SCRIPT_LANGUAGE" = "en" ]; then
+                redundancy_level="✅ TRIPLE PARITY"
+                failure_tolerance="✅ Tolerates up to 3 disk failures"
+                performance_note="⚡ Conservative performance"
+            else
+                redundancy_level="✅ PARIDAD TRIPLE"
+                failure_tolerance="✅ Tolera fallo de hasta 3 discos"
+                performance_note="⚡ Rendimiento conservador"
+            fi
             ;;
     esac
     
@@ -2646,20 +3421,37 @@ show_raid_preview() {
     local usable_formatted=$(format_capacity "$usable_gb")
     
     echo ""
-    echo "🎯 CONFIGURACIÓN RAID RESULTANTE:"
-    echo "════════════════════════════════════════════════════════════════"
-    echo "📦 CAPACIDAD:"
-    echo "   Discos: $num_disks x ${min_size_formatted}"
-    echo "   Capacidad bruta total: ${total_raw_formatted}"
-    echo "   Capacidad utilizable: ${usable_formatted}"
-    echo "   Eficiencia de almacenamiento: ${efficiency}%"
-    echo ""
-    echo "🔒 PROTECCIÓN DE DATOS:"
-    echo "   $redundancy_level"
-    echo "   $failure_tolerance"
-    echo ""
-    echo "⚡ RENDIMIENTO:"
-    echo "   $performance_note"
+    if [ "$SCRIPT_LANGUAGE" = "en" ]; then
+        echo "🎯 RESULTING RAID CONFIGURATION:"
+        echo "════════════════════════════════════════════════════════════════"
+        echo "📦 CAPACITY:"
+        echo "   Disks: $num_disks x ${min_size_formatted}"
+        echo "   Total raw capacity: ${total_raw_formatted}"
+        echo "   Usable capacity: ${usable_formatted}"
+        echo "   Storage efficiency: ${efficiency}%"
+        echo ""
+        echo "🔒 DATA PROTECTION:"
+        echo "   $redundancy_level"
+        echo "   $failure_tolerance"
+        echo ""
+        echo "⚡ PERFORMANCE:"
+        echo "   $performance_note"
+    else
+        echo "🎯 CONFIGURACIÓN RAID RESULTANTE:"
+        echo "════════════════════════════════════════════════════════════════"
+        echo "📦 CAPACIDAD:"
+        echo "   Discos: $num_disks x ${min_size_formatted}"
+        echo "   Capacidad bruta total: ${total_raw_formatted}"
+        echo "   Capacidad utilizable: ${usable_formatted}"
+        echo "   Eficiencia de almacenamiento: ${efficiency}%"
+        echo ""
+        echo "🔒 PROTECCIÓN DE DATOS:"
+        echo "   $redundancy_level"
+        echo "   $failure_tolerance"
+        echo ""
+        echo "⚡ RENDIMIENTO:"
+        echo "   $performance_note"
+    fi
     
     # Verificar si hay diferencias de tamaño significativas
     local max_size_bytes=$(printf '%s\n' "${disk_sizes[@]}" | sort -nr | head -1)
@@ -2675,18 +3467,31 @@ show_raid_preview() {
         local wasted_formatted=$(format_capacity "$wasted_gb")
         
         echo ""
-        echo "⚠️  ADVERTENCIA - DIFERENCIA DE TAMAÑOS:"
-        echo "   Disco más pequeño: ${min_size_formatted}"
-        echo "   Disco más grande: ${max_size_formatted}"
-        echo "   Espacio desperdiciado: ~${wasted_formatted}"
-        echo "   💡 Se recomienda usar discos de tamaño similar"
+        if [ "$SCRIPT_LANGUAGE" = "en" ]; then
+            echo "⚠️  WARNING - SIZE DIFFERENCE:"
+            echo "   Smallest disk: ${min_size_formatted}"
+            echo "   Largest disk: ${max_size_formatted}"
+            echo "   Wasted space: ~${wasted_formatted}"
+            echo "   💡 It's recommended to use similarly sized disks"
+        else
+            echo "⚠️  ADVERTENCIA - DIFERENCIA DE TAMAÑOS:"
+            echo "   Disco más pequeño: ${min_size_formatted}"
+            echo "   Disco más grande: ${max_size_formatted}"
+            echo "   Espacio desperdiciado: ~${wasted_formatted}"
+            echo "   💡 Se recomienda usar discos de tamaño similar"
+        fi
     fi
     
     # Advertencias específicas
     if [[ "$raid_type" == "raid5" || "$raid_type" == "raid6" ]] && [ "$FILESYSTEM_TYPE" = "btrfs" ]; then
         echo ""
-        echo "⚠️  ADVERTENCIA BTRFS:"
-        echo "   RAID 5/6 en BTRFS es EXPERIMENTAL y puede causar corrupción"
+        if [ "$SCRIPT_LANGUAGE" = "en" ]; then
+            echo "⚠️  BTRFS WARNING:"
+            echo "   RAID 5/6 in BTRFS is EXPERIMENTAL and may cause corruption"
+        else
+            echo "⚠️  ADVERTENCIA BTRFS:"
+            echo "   RAID 5/6 en BTRFS es EXPERIMENTAL y puede causar corrupción"
+        fi
         echo "   💡 Considera usar ZFS para RAID 5/6, o RAID 1/10 en BTRFS"
     fi
     
@@ -2695,7 +3500,11 @@ show_raid_preview() {
 
 # Función para seleccionar discos
 select_disks() {
-    show_title "Selección de Discos"
+    if [ "$SCRIPT_LANGUAGE" = "en" ]; then
+        show_title "Disk Selection"
+    else
+        show_title "Selección de Discos"
+    fi
     
     local min_disks=2
     case $RAID_TYPE in
@@ -2705,17 +3514,35 @@ select_disks() {
         "raidz3") min_disks=4;;
     esac
     
-    show_message "Selecciona los discos para el RAID (mínimo $min_disks discos):"
-    echo ""
-    echo "📖 INSTRUCCIONES DE SELECCIÓN:"
-    echo "   Selección individual: Escribe el número del disco (ej: 3)"
-    echo "   Selección múltiple:   Escribe números separados por espacios (ej: 3 4 5 6)"
-    echo "   Selección por rango:  Escribe rango con guión (ej: 3-6)"
-    echo "   Quitar selección:     Vuelve a escribir el número del disco"
-    echo ""
-    echo "🎯 COMANDOS ESPECIALES:"
-    echo "   'clear' - Limpiar toda la selección"
-    echo "   'done'  - Finalizar selección y continuar"
+    if [ "$SCRIPT_LANGUAGE" = "en" ]; then
+        show_message "Select disks for RAID (minimum $min_disks disks):"
+        echo ""
+        echo "📖 SELECTION INSTRUCTIONS:"
+        echo "   Individual selection: Write disk number (ex: 3)"
+        echo "   Multiple selection:   Write numbers separated by spaces (ex: 3 4 5 6)"
+        echo "   Range selection:      Write range with dash (ex: 3-6)"
+        echo "   Toggle selection:     Write disk number again to add/remove"
+        echo ""
+        echo "🎯 SPECIAL COMMANDS:"
+        echo "   'clear' - Clear all selection"
+        echo "   'done'  - Finish selection and continue"
+        echo ""
+        echo "💡 TIP: You can modify your selection at any time by entering more disk numbers"
+    else
+        show_message "Selecciona los discos para el RAID (mínimo $min_disks discos):"
+        echo ""
+        echo "📖 INSTRUCCIONES DE SELECCIÓN:"
+        echo "   Selección individual: Escribe el número del disco (ej: 3)"
+        echo "   Selección múltiple:   Escribe números separados por espacios (ej: 3 4 5 6)"
+        echo "   Selección por rango:  Escribe rango con guión (ej: 3-6)"
+        echo "   Alternar selección:   Vuelve a escribir el número del disco para agregar/quitar"
+        echo ""
+        echo "🎯 COMANDOS ESPECIALES:"
+        echo "   'clear' - Limpiar toda la selección"
+        echo "   'done'  - Finalizar selección y continuar"
+        echo ""
+        echo "💡 CONSEJO: Puedes modificar tu selección en cualquier momento ingresando más números de disco"
+    fi
     echo ""
     
     SELECTED_DISKS=()
@@ -2723,43 +3550,111 @@ select_disks() {
     DISKS_TO_CLEAN=()
     
     while true; do
-        echo "Discos disponibles:"
+        if [ "$SCRIPT_LANGUAGE" = "en" ]; then
+            echo "Available disks:"
+        else
+            if [ "$SCRIPT_LANGUAGE" = "en" ]; then
+                echo "Available disks:"
+            else
+                echo "Discos disponibles:"
+            fi
+        fi
         for i in "${!AVAILABLE_DISKS[@]}"; do
             disk="/dev/${AVAILABLE_DISKS[$i]}"
             size=$(lsblk -dpno SIZE "$disk" | tr -d ' ')
             status="${DISK_RAID_STATUS[$i]}"
             
             if [ -n "$status" ]; then
-                echo -e "  $((i+1)). ${AVAILABLE_DISKS[$i]} - $size ${RED}[EN USO: $status]${NC}"
+                if [ "$SCRIPT_LANGUAGE" = "en" ]; then
+                    echo -e "  $((i+1)). ${AVAILABLE_DISKS[$i]} - $size ${RED}[IN USE: $status]${NC}"
+                else
+                    echo -e "  $((i+1)). ${AVAILABLE_DISKS[$i]} - $size ${RED}[EN USO: $status]${NC}"
+                fi
             else
-                echo "  $((i+1)). ${AVAILABLE_DISKS[$i]} - $size [LIBRE]"
+                if [ "$SCRIPT_LANGUAGE" = "en" ]; then
+                    echo "  $((i+1)). ${AVAILABLE_DISKS[$i]} - $size [FREE]"
+                else
+                    echo "  $((i+1)). ${AVAILABLE_DISKS[$i]} - $size [LIBRE]"
+                fi
             fi
         done
         
         echo ""
         if [ ${#SELECTED_DISKS[@]} -gt 0 ]; then
-            echo "✅ Discos seleccionados (${#SELECTED_DISKS[@]}/${#AVAILABLE_DISKS[@]}): ${SELECTED_DISKS[*]}"
+            if [ "$SCRIPT_LANGUAGE" = "en" ]; then
+                echo "✅ Selected disks (${#SELECTED_DISKS[@]}/${#AVAILABLE_DISKS[@]}): ${SELECTED_DISKS[*]}"
+            else
+                echo "✅ Discos seleccionados (${#SELECTED_DISKS[@]}/${#AVAILABLE_DISKS[@]}): ${SELECTED_DISKS[*]}"
+            fi
             
             # Mostrar vista previa de la configuración RAID
             show_raid_preview "$RAID_TYPE" "${SELECTED_DISKS[@]}"
         else
-            echo "⭕ Discos seleccionados: ninguno"
+            if [ "$SCRIPT_LANGUAGE" = "en" ]; then
+                echo "⭕ Selected disks: none"
+            else
+                echo "⭕ Discos seleccionados: ninguno"
+            fi
         fi
         echo ""
         
-        read -p "👉 Selección: " choice
+        # Show available commands reminder
+        if [ ${#SELECTED_DISKS[@]} -ge $min_disks ]; then
+            if [ "$SCRIPT_LANGUAGE" = "en" ]; then
+                echo "💡 AVAILABLE COMMANDS:"
+                echo "   • 'done' - Finish selection and continue"
+                echo "   • 'clear' - Clear all selected disks"
+                echo "   • Add more disks: Enter disk number (ex: 1, 2)"
+                echo "   • Remove disks: Enter selected disk number again"
+                echo "   • Use ranges: Enter range (ex: 1-2)"
+            else
+                echo "💡 COMANDOS DISPONIBLES:"
+                echo "   • 'done' - Finalizar selección y continuar"
+                echo "   • 'clear' - Limpiar todos los discos seleccionados"
+                echo "   • Agregar más discos: Ingresa número de disco (ej: 1, 2)"
+                echo "   • Quitar discos: Ingresa número de disco seleccionado otra vez"
+                echo "   • Usar rangos: Ingresa rango (ej: 1-2)"
+            fi
+        else
+            if [ "$SCRIPT_LANGUAGE" = "en" ]; then
+                echo "💡 AVAILABLE COMMANDS:"
+                echo "   • Enter disk numbers: Individual (ex: 3), multiple (ex: 3 4 5), ranges (ex: 3-6)"
+                echo "   • 'clear' - Reset selection"
+                echo "   • Need minimum $min_disks disks to continue"
+            else
+                echo "💡 COMANDOS DISPONIBLES:"
+                echo "   • Ingresa números de disco: Individual (ej: 3), múltiple (ej: 3 4 5), rangos (ej: 3-6)"
+                echo "   • 'clear' - Resetear selección"
+                echo "   • Se necesitan mínimo $min_disks discos para continuar"
+            fi
+        fi
+        echo ""
+        
+        if [ "$SCRIPT_LANGUAGE" = "en" ]; then
+            read -p "👉 Selection: " choice
+        else
+            read -p "👉 Selección: " choice
+        fi
         
         if [ "$choice" = "done" ]; then
             if [ ${#SELECTED_DISKS[@]} -ge $min_disks ]; then
                 break
             else
-                show_error "❌ Necesitas al menos $min_disks discos para este RAID"
+                if [ "$SCRIPT_LANGUAGE" = "en" ]; then
+                    show_error "❌ You need at least $min_disks disks for this RAID"
+                else
+                    show_error "❌ Necesitas al menos $min_disks discos para este RAID"
+                fi
             fi
         elif [ "$choice" = "clear" ]; then
             SELECTED_DISKS=()
             SELECTED_DISK_SIZES=()
             DISKS_TO_CLEAN=()
-            show_message "🧹 Selección limpiada"
+            if [ "$SCRIPT_LANGUAGE" = "en" ]; then
+                show_message "🧹 Selection cleared"
+            else
+                show_message "🧹 Selección limpiada"
+            fi
         elif [[ "$choice" =~ ^[0-9]+(-[0-9]+)?$ ]]; then
             # Manejar rangos (ej: 3-6)
             if [[ "$choice" =~ - ]]; then
@@ -2775,12 +3670,22 @@ select_disks() {
                         # Procesar disco (similar a la lógica individual)
                         if [[ ! " ${SELECTED_DISKS[*]} " =~ " ${disk} " ]]; then
                             if [ -n "$disk_status" ]; then
-                                show_warning "⚠️  Disco $disk está en uso: $disk_status"
-                                if confirm "¿Limpiar $disk y agregarlo?"; then
-                                    SELECTED_DISKS+=("$disk")
-                                    disk_size=$(lsblk -dpno SIZE "/dev/$disk" --bytes)
-                                    SELECTED_DISK_SIZES+=("$disk_size")
-                                    DISKS_TO_CLEAN+=("$disk")
+                                if [ "$SCRIPT_LANGUAGE" = "en" ]; then
+                                    show_warning "⚠️  Disk $disk is in use: $disk_status"
+                                    if confirm "Clean $disk and add it?"; then
+                                        SELECTED_DISKS+=("$disk")
+                                        disk_size=$(lsblk -dpno SIZE "/dev/$disk" --bytes)
+                                        SELECTED_DISK_SIZES+=("$disk_size")
+                                        DISKS_TO_CLEAN+=("$disk")
+                                    fi
+                                else
+                                    show_warning "⚠️  Disco $disk está en uso: $disk_status"
+                                    if confirm "¿Limpiar $disk y agregarlo?"; then
+                                        SELECTED_DISKS+=("$disk")
+                                        disk_size=$(lsblk -dpno SIZE "/dev/$disk" --bytes)
+                                        SELECTED_DISK_SIZES+=("$disk_size")
+                                        DISKS_TO_CLEAN+=("$disk")
+                                    fi
                                 fi
                             else
                                 SELECTED_DISKS+=("$disk")
@@ -2789,9 +3694,17 @@ select_disks() {
                             fi
                         fi
                     done
-                    show_message "✅ Procesado rango $start-$end"
+                    if [ "$SCRIPT_LANGUAGE" = "en" ]; then
+                        show_message "✅ Processed range $start-$end"
+                    else
+                        show_message "✅ Procesado rango $start-$end"
+                    fi
                 else
-                    echo "❌ Rango inválido. Usa formato: inicio-fin (ej: 3-6)"
+                    if [ "$SCRIPT_LANGUAGE" = "en" ]; then
+                        echo "❌ Invalid range. Use format: start-end (ex: 3-6)"
+                    else
+                        echo "❌ Rango inválido. Usa formato: inicio-fin (ej: 3-6)"
+                    fi
                 fi
             else
                 # Selección individual (lógica original)
@@ -2821,32 +3734,59 @@ select_disks() {
                             fi
                         done
                         DISKS_TO_CLEAN=("${new_to_clean[@]}")
-                        show_message "➖ Removido: $disk"
+                        if [ "$SCRIPT_LANGUAGE" = "en" ]; then
+                            show_message "➖ Removed: $disk"
+                        else
+                            show_message "➖ Removido: $disk"
+                        fi
                     else
                         # Verificar si el disco está en uso
                         if [ -n "$disk_status" ]; then
-                            show_warning "⚠️  El disco $disk está en uso: $disk_status"
-                            show_warning "⚠️  Si continúas, este disco será completamente limpiado y se perderán TODOS los datos."
-                            
-                            if confirm "¿Deseas limpiar este disco y usarlo para el nuevo RAID?"; then
-                                SELECTED_DISKS+=("$disk")
-                                disk_size=$(lsblk -dpno SIZE "/dev/$disk" --bytes)
-                                SELECTED_DISK_SIZES+=("$disk_size")
-                                DISKS_TO_CLEAN+=("$disk")
-                                show_message "✅ Agregado (se limpiará): $disk"
+                            if [ "$SCRIPT_LANGUAGE" = "en" ]; then
+                                show_warning "⚠️  Disk $disk is in use: $disk_status"
+                                show_warning "⚠️  If you continue, this disk will be completely cleaned and ALL data will be lost."
+                                
+                                if confirm "Do you want to clean this disk and use it for the new RAID?"; then
+                                    SELECTED_DISKS+=("$disk")
+                                    disk_size=$(lsblk -dpno SIZE "/dev/$disk" --bytes)
+                                    SELECTED_DISK_SIZES+=("$disk_size")
+                                    DISKS_TO_CLEAN+=("$disk")
+                                    show_message "✅ Added (will be cleaned): $disk"
+                                else
+                                    show_message "❌ Disk $disk not selected"
+                                fi
                             else
-                                show_message "❌ Disco $disk no seleccionado"
+                                show_warning "⚠️  El disco $disk está en uso: $disk_status"
+                                show_warning "⚠️  Si continúas, este disco será completamente limpiado y se perderán TODOS los datos."
+                                
+                                if confirm "¿Deseas limpiar este disco y usarlo para el nuevo RAID?"; then
+                                    SELECTED_DISKS+=("$disk")
+                                    disk_size=$(lsblk -dpno SIZE "/dev/$disk" --bytes)
+                                    SELECTED_DISK_SIZES+=("$disk_size")
+                                    DISKS_TO_CLEAN+=("$disk")
+                                    show_message "✅ Agregado (se limpiará): $disk"
+                                else
+                                    show_message "❌ Disco $disk no seleccionado"
+                                fi
                             fi
                         else
                             # Agregar a la selección (disco libre)
                             SELECTED_DISKS+=("$disk")
                             disk_size=$(lsblk -dpno SIZE "/dev/$disk" --bytes)
                             SELECTED_DISK_SIZES+=("$disk_size")
-                            show_message "✅ Agregado: $disk"
+                            if [ "$SCRIPT_LANGUAGE" = "en" ]; then
+                                show_message "✅ Added: $disk"
+                            else
+                                show_message "✅ Agregado: $disk"
+                            fi
                         fi
                     fi
                 else
-                    echo "❌ Número inválido. Usa 1-${#AVAILABLE_DISKS[@]}"
+                    if [ "$SCRIPT_LANGUAGE" = "en" ]; then
+                        echo "❌ Invalid number. Use 1-${#AVAILABLE_DISKS[@]}"
+                    else
+                        echo "❌ Número inválido. Usa 1-${#AVAILABLE_DISKS[@]}"
+                    fi
                 fi
             fi
         elif [[ "$choice" =~ ^[0-9\ ]+$ ]]; then
@@ -2859,35 +3799,66 @@ select_disks() {
                     
                     if [[ ! " ${SELECTED_DISKS[*]} " =~ " ${disk} " ]]; then
                         if [ -n "$disk_status" ]; then
-                            show_warning "⚠️  Disco $disk está en uso: $disk_status"
-                            if confirm "¿Limpiar $disk y agregarlo?"; then
-                                SELECTED_DISKS+=("$disk")
-                                disk_size=$(lsblk -dpno SIZE "/dev/$disk" --bytes)
-                                SELECTED_DISK_SIZES+=("$disk_size")
-                                DISKS_TO_CLEAN+=("$disk")
-                                show_message "✅ Agregado (se limpiará): $disk"
+                            if [ "$SCRIPT_LANGUAGE" = "en" ]; then
+                                show_warning "⚠️  Disk $disk is in use: $disk_status"
+                                if confirm "Clean $disk and add it?"; then
+                                    SELECTED_DISKS+=("$disk")
+                                    disk_size=$(lsblk -dpno SIZE "/dev/$disk" --bytes)
+                                    SELECTED_DISK_SIZES+=("$disk_size")
+                                    DISKS_TO_CLEAN+=("$disk")
+                                    show_message "✅ Added (will be cleaned): $disk"
+                                fi
+                            else
+                                show_warning "⚠️  Disco $disk está en uso: $disk_status"
+                                if confirm "¿Limpiar $disk y agregarlo?"; then
+                                    SELECTED_DISKS+=("$disk")
+                                    disk_size=$(lsblk -dpno SIZE "/dev/$disk" --bytes)
+                                    SELECTED_DISK_SIZES+=("$disk_size")
+                                    DISKS_TO_CLEAN+=("$disk")
+                                    show_message "✅ Agregado (se limpiará): $disk"
+                                fi
                             fi
                         else
                             SELECTED_DISKS+=("$disk")
                             disk_size=$(lsblk -dpno SIZE "/dev/$disk" --bytes)
                             SELECTED_DISK_SIZES+=("$disk_size")
-                            show_message "✅ Agregado: $disk"
+                            if [ "$SCRIPT_LANGUAGE" = "en" ]; then
+                                show_message "✅ Added: $disk"
+                            else
+                                show_message "✅ Agregado: $disk"
+                            fi
                         fi
                     else
-                        show_message "ℹ️  $disk ya estaba seleccionado"
+                        if [ "$SCRIPT_LANGUAGE" = "en" ]; then
+                            show_message "ℹ️  $disk was already selected"
+                        else
+                            show_message "ℹ️  $disk ya estaba seleccionado"
+                        fi
                     fi
                 else
-                    echo "❌ Número inválido: $num (usa 1-${#AVAILABLE_DISKS[@]})"
+                    if [ "$SCRIPT_LANGUAGE" = "en" ]; then
+                        echo "❌ Invalid number: $num (use 1-${#AVAILABLE_DISKS[@]})"
+                    else
+                        echo "❌ Número inválido: $num (usa 1-${#AVAILABLE_DISKS[@]})"
+                    fi
                 fi
             done
         else
-            echo "Opción inválida"
+            if [ "$SCRIPT_LANGUAGE" = "en" ]; then
+                echo "Invalid option"
+            else
+                echo "Opción inválida"
+            fi
         fi
     done
     
     # Si hay discos para limpiar, mostrar resumen y confirmar
     if [ ${#DISKS_TO_CLEAN[@]} -gt 0 ]; then
-        show_warning "RESUMEN DE DISCOS A LIMPIAR:"
+        if [ "$SCRIPT_LANGUAGE" = "en" ]; then
+            show_warning "SUMMARY OF DISKS TO CLEAN:"
+        else
+            show_warning "RESUMEN DE DISCOS A LIMPIAR:"
+        fi
         for disk in "${DISKS_TO_CLEAN[@]}"; do
             # Encontrar el índice del disco para mostrar su estado
             for i in "${!AVAILABLE_DISKS[@]}"; do
@@ -2898,11 +3869,20 @@ select_disks() {
             done
         done
         
-        show_warning "¡TODOS LOS DATOS EN ESTOS DISCOS SE PERDERÁN PERMANENTEMENTE!"
-        
-        if ! confirm "¿Estás completamente seguro de que deseas continuar?"; then
-            show_message "Operación cancelada por el usuario"
-            exit 0
+        if [ "$SCRIPT_LANGUAGE" = "en" ]; then
+            show_warning "ALL DATA ON THESE DISKS WILL BE PERMANENTLY LOST!"
+            
+            if ! confirm "Are you completely sure you want to continue?"; then
+                show_message "Operation cancelled by user"
+                exit 0
+            fi
+        else
+            show_warning "¡TODOS LOS DATOS EN ESTOS DISCOS SE PERDERÁN PERMANENTEMENTE!"
+            
+            if ! confirm "¿Estás completamente seguro de que deseas continuar?"; then
+                show_message "Operación cancelada por el usuario"
+                exit 0
+            fi
         fi
         
         # Proceder con la limpieza
@@ -2910,7 +3890,11 @@ select_disks() {
             clean_disk "$disk"
         done
         
-        show_message "Todos los discos han sido limpiados exitosamente"
+        if [ "$SCRIPT_LANGUAGE" = "en" ]; then
+            show_message "All disks have been cleaned successfully"
+        else
+            show_message "Todos los discos han sido limpiados exitosamente"
+        fi
     fi
     
     # Calcular capacidad del RAID
@@ -2919,23 +3903,46 @@ select_disks() {
 
 # Función para configurar BTRFS
 setup_btrfs() {
-    show_title "Configurando BTRFS RAID"
+    if [ "$SCRIPT_LANGUAGE" = "en" ]; then
+        show_title "Configuring BTRFS RAID"
+    else
+        show_title "Configurando BTRFS RAID"
+    fi
     
     # Seleccionar tipo de RAID
     show_raid_types
     while true; do
-        read -p "Selecciona el tipo de RAID (1-5): " choice
+        if [ "$SCRIPT_LANGUAGE" = "en" ]; then
+            read -p "Select RAID type (1-5): " choice
+        else
+            read -p "Selecciona el tipo de RAID (1-5): " choice
+        fi
         case $choice in
             1) RAID_TYPE="raid0"; break;;
             2) RAID_TYPE="raid1"; break;;
             3) RAID_TYPE="raid5"; 
-               show_warning "RAID 5 es experimental en BTRFS"
-               if confirm "¿Deseas continuar?"; then break; else continue; fi;;
+               if [ "$SCRIPT_LANGUAGE" = "en" ]; then
+                   show_warning "RAID 5 is experimental in BTRFS"
+                   if confirm "Do you want to continue?"; then break; else continue; fi
+               else
+                   show_warning "RAID 5 es experimental en BTRFS"
+                   if confirm "¿Deseas continuar?"; then break; else continue; fi
+               fi;;
             4) RAID_TYPE="raid6";
-               show_warning "RAID 6 es experimental en BTRFS"
-               if confirm "¿Deseas continuar?"; then break; else continue; fi;;
+               if [ "$SCRIPT_LANGUAGE" = "en" ]; then
+                   show_warning "RAID 6 is experimental in BTRFS"
+                   if confirm "Do you want to continue?"; then break; else continue; fi
+               else
+                   show_warning "RAID 6 es experimental en BTRFS"
+                   if confirm "¿Deseas continuar?"; then break; else continue; fi
+               fi;;
             5) RAID_TYPE="raid10"; break;;
-            *) echo "Opción inválida";;
+            *) 
+               if [ "$SCRIPT_LANGUAGE" = "en" ]; then
+                   echo "Invalid option"
+               else
+                   echo "Opción inválida"
+               fi;;
         esac
     done
     
@@ -2980,22 +3987,38 @@ get_system_ram() {
 
 # Función para configurar ZFS
 setup_zfs() {
-    show_title "Configurando ZFS RAID"
+    if [ "$SCRIPT_LANGUAGE" = "en" ]; then
+        show_title "Configuring ZFS RAID"
+    else
+        show_title "Configurando ZFS RAID"
+    fi
     
     # Verificar que ZFS esté disponible (debería estarlo después de check_and_install_requirements)
     if ! command -v zpool &> /dev/null; then
-        show_error "ZFS no está disponible. Esto no debería suceder después de la verificación de requisitos."
+        if [ "$SCRIPT_LANGUAGE" = "en" ]; then
+            show_error "ZFS is not available. This should not happen after requirements verification."
+        else
+            show_error "ZFS no está disponible. Esto no debería suceder después de la verificación de requisitos."
+        fi
         exit 1
     fi
     
     # Verificar que el módulo ZFS esté cargado
     if ! lsmod | grep -q "^zfs "; then
-        show_message "Cargando módulo ZFS..."
+        if [ "$SCRIPT_LANGUAGE" = "en" ]; then
+            show_message "Loading ZFS module..."
+        else
+            show_message "Cargando módulo ZFS..."
+        fi
         sudo modprobe zfs
         sleep 2
         
         if ! lsmod | grep -q "^zfs "; then
-            show_error "No se pudo cargar el módulo ZFS"
+            if [ "$SCRIPT_LANGUAGE" = "en" ]; then
+                show_error "Could not load ZFS module"
+            else
+                show_error "No se pudo cargar el módulo ZFS"
+            fi
             exit 1
         fi
     fi
@@ -3003,7 +4026,11 @@ setup_zfs() {
     # Seleccionar tipo de RAID
     show_raid_types
     while true; do
-        read -p "Selecciona el tipo de RAID (1-5): " choice
+        if [ "$SCRIPT_LANGUAGE" = "en" ]; then
+            read -p "Select RAID type (1-5): " choice
+        else
+            read -p "Selecciona el tipo de RAID (1-5): " choice
+        fi
         case $choice in
             1) RAID_TYPE="stripe"; break;;
             2) RAID_TYPE="mirror"; break;;
@@ -3017,7 +4044,11 @@ setup_zfs() {
     select_disks
     
     # Solicitar nombre del pool
-    read -p "Ingresa el nombre del pool ZFS: " POOL_NAME
+    if [ "$SCRIPT_LANGUAGE" = "en" ]; then
+        read -p "Enter ZFS pool name: " POOL_NAME
+    else
+        read -p "Ingresa el nombre del pool ZFS: " POOL_NAME
+    fi
     
     # Configurar ARC
     local system_ram=$(get_system_ram)
@@ -3026,10 +4057,17 @@ setup_zfs() {
         recommended_arc=1
     fi
     
-    show_message "RAM del sistema: ${system_ram}GB"
-    show_message "ARC recomendado: ${recommended_arc}GB"
-    
-    read -p "¿Cuántos GB quieres asignar al ARC? [$recommended_arc]: " arc_size
+    if [ "$SCRIPT_LANGUAGE" = "en" ]; then
+        show_message "System RAM: ${system_ram}GB"
+        show_message "Recommended ARC: ${recommended_arc}GB"
+        
+        read -p "How many GB do you want to assign to ARC? [$recommended_arc]: " arc_size
+    else
+        show_message "RAM del sistema: ${system_ram}GB"
+        show_message "ARC recomendado: ${recommended_arc}GB"
+        
+        read -p "¿Cuántos GB quieres asignar al ARC? [$recommended_arc]: " arc_size
+    fi
     arc_size=${arc_size:-$recommended_arc}
     
     # Detectar ashift óptimo considerando compatibilidad futura
@@ -3075,7 +4113,11 @@ setup_zfs() {
     show_message "[INFO]    ✅ Esto garantiza compatibilidad con cache devices SSD (4096 bytes)"
     
     # Crear el pool ZFS
-    show_message "Creando pool ZFS..."
+    if [ "$SCRIPT_LANGUAGE" = "en" ]; then
+        show_message "Creating ZFS pool..."
+    else
+        show_message "Creando pool ZFS..."
+    fi
     
     device_list=""
     for disk in "${SELECTED_DISKS[@]}"; do
@@ -3125,11 +4167,19 @@ setup_zfs() {
             sudo zpool add "$POOL_NAME" cache "/dev/${NVME_DISK}p1"
             sudo zpool add "$POOL_NAME" log "/dev/${NVME_DISK}p2"
             
-            show_message "NVME configurado como cache y log"
+            if [ "$SCRIPT_LANGUAGE" = "en" ]; then
+                show_message "NVME configured as cache and log"
+            else
+                show_message "NVME configurado como cache y log"
+            fi
         fi
     fi
     
-    show_message "ZFS pool configurado exitosamente"
+    if [ "$SCRIPT_LANGUAGE" = "en" ]; then
+        show_message "ZFS pool configured successfully"
+    else
+        show_message "ZFS pool configurado exitosamente"
+    fi
     
     # Crear datasets dentro del pool principal usando la función reutilizable
     echo ""
@@ -3158,7 +4208,11 @@ setup_zfs() {
         done
         
         echo ""
-        echo "💡 INFORMACIÓN SOBRE POOLS ADICIONALES:"
+        if [ "$SCRIPT_LANGUAGE" = "en" ]; then
+            echo "💡 ADDITIONAL POOLS INFORMATION:"
+        else
+            echo "💡 INFORMACIÓN SOBRE POOLS ADICIONALES:"
+        fi
         echo "   Los pools adicionales son independientes del pool principal."
         echo "   Útiles para:"
         echo "   • Separar datos por uso (backup, cache, temp)"
@@ -3187,7 +4241,11 @@ setup_zfs() {
                     continue
                 fi
                 
-                echo "Discos disponibles para el pool '$additional_pool_name':"
+                if [ "$SCRIPT_LANGUAGE" = "en" ]; then
+                    echo "Available disks for pool '$additional_pool_name':"
+                else
+                    echo "Discos disponibles para el pool '$additional_pool_name':"
+                fi
                 for i in "${!remaining_disks[@]}"; do
                     disk="${remaining_disks[$i]}"
                     size=$(lsblk -dpno SIZE "/dev/$disk" | tr -d ' ')
@@ -3196,7 +4254,11 @@ setup_zfs() {
                 done
                 
                 echo ""
-                echo "Tipos de RAID disponibles:"
+                if [ "$SCRIPT_LANGUAGE" = "en" ]; then
+                    echo "Available RAID types:"
+                else
+                    echo "Tipos de RAID disponibles:"
+                fi
                 echo "1. Stripe - Sin redundancia, máximo rendimiento"
                 echo "2. Mirror - Datos duplicados entre discos"
                 echo "3. RAIDZ1 - Un disco de paridad (mínimo 3 discos)"
@@ -3291,7 +4353,11 @@ setup_zfs() {
                 
                 # Limpiar discos seleccionados antes de crear el pool
                 for disk in "${selected_additional_disks[@]}"; do
-                    show_message "🧹 Limpiando disco /dev/$disk antes de usarlo..."
+                    if [ "$SCRIPT_LANGUAGE" = "en" ]; then
+                        show_message "🧹 Cleaning disk /dev/$disk before using it..."
+                    else
+                        show_message "🧹 Limpiando disco /dev/$disk antes de usarlo..."
+                    fi
                     clean_disk "$disk"
                 done
                 
@@ -3448,7 +4514,11 @@ offer_post_creation_dataset_management() {
             echo "   5. ⚙️  Reconfigurar atime"
             echo "   6. ✅ Finalizar"
             echo ""
-            echo "💡 NOTA: Los dispositivos de cache (opción 1) deben ser SSD o NVMe"
+            if [ "$SCRIPT_LANGUAGE" = "en" ]; then
+                echo "💡 NOTE: Cache devices (option 1) must be SSD or NVMe"
+            else
+                echo "💡 NOTA: Los dispositivos de cache (opción 1) deben ser SSD o NVMe"
+            fi
             echo "   ⚠️  NO usar discos mecánicos - pueden empeorar el rendimiento"
             echo ""
             
@@ -3470,7 +4540,11 @@ offer_post_creation_dataset_management() {
                         show_error "Error: POOL_NAME no está definido. Esto no debería ocurrir."
                         echo "Información de debug:"
                         echo "  FILESYSTEM_TYPE: $FILESYSTEM_TYPE"
-                        echo "  Pools disponibles: $(zpool list -H -o name 2>/dev/null | tr '\n' ' ')"
+                        if [ "$SCRIPT_LANGUAGE" = "en" ]; then
+                            echo "  Available pools: $(zpool list -H -o name 2>/dev/null | tr '\n' ' ')"
+                        else
+                            echo "  Pools disponibles: $(zpool list -H -o name 2>/dev/null | tr '\n' ' ')"
+                        fi
                         read -p "Presiona Enter para continuar..."
                     else
                         show_pool_status "$POOL_NAME"
@@ -3490,7 +4564,11 @@ offer_post_creation_dataset_management() {
                     echo "   Usado: $(zpool list -H -o alloc "$POOL_NAME" 2>/dev/null || echo 'Desconocido')"
                     echo "   Libre: $(zpool list -H -o free "$POOL_NAME" 2>/dev/null || echo 'Desconocido')"
                     echo ""
-                    echo "✅ Configuración de RAID ZFS completada exitosamente!"
+                    if [ "$SCRIPT_LANGUAGE" = "en" ]; then
+                        echo "✅ ZFS RAID configuration completed successfully!"
+                    else
+                        echo "✅ Configuración de RAID ZFS completada exitosamente!"
+                    fi
                     break
                     ;;
                 *)
@@ -3504,7 +4582,11 @@ offer_post_creation_dataset_management() {
     # Asegurar que las variables estén definidas para evitar errores
     if [ -z "$POOL_NAME" ] && [ "$FILESYSTEM_TYPE" = "zfs" ]; then
         echo "⚠️  ADVERTENCIA: POOL_NAME no está definido al final de la gestión post-creación."
-        echo "   Esto podría indicar un problema en el script."
+        if [ "$SCRIPT_LANGUAGE" = "en" ]; then
+            echo "   This could indicate a problem in the script."
+        else
+            echo "   Esto podría indicar un problema en el script."
+        fi
     fi
 }
 
@@ -3514,15 +4596,27 @@ configure_atime_settings() {
     
     show_title "Configuración de Atime en ZFS"
     echo ""
-    echo "💡 INFORMACIÓN SOBRE ATIME:"
+    if [ "$SCRIPT_LANGUAGE" = "en" ]; then
+        echo "💡 ATIME INFORMATION:"
+    else
+        echo "💡 INFORMACIÓN SOBRE ATIME:"
+    fi
     echo "   atime (access time) registra la última vez que se accedió a un archivo."
     echo "   En sistemas con muchas operaciones de lectura, puede impactar el rendimiento."
     echo ""
-    echo "📊 OPCIONES DISPONIBLES EN ZFS:"
+    if [ "$SCRIPT_LANGUAGE" = "en" ]; then
+        echo "📊 AVAILABLE OPTIONS IN ZFS:"
+    else
+        echo "📊 OPCIONES DISPONIBLES EN ZFS:"
+    fi
     echo "   1. off        - No registrar atime (RECOMENDADO para rendimiento)"
     echo "   2. on         - Registrar atime completo (puede reducir rendimiento)"
     echo ""
-    echo "💡 RECOMENDACIÓN: Opción 1 (off) para máximo rendimiento"
+    if [ "$SCRIPT_LANGUAGE" = "en" ]; then
+        echo "💡 RECOMMENDATION: Option 1 (off) for maximum performance"
+    else
+        echo "💡 RECOMENDACIÓN: Opción 1 (off) para máximo rendimiento"
+    fi
     echo "   ⚠️  NOTA: ZFS solo soporta 'on' u 'off' (no soporta 'relatime')"
     echo "   La mayoría de aplicaciones no necesitan atime y deshabilitarlo"
     echo "   mejora significativamente el rendimiento de lectura."
@@ -3549,25 +4643,49 @@ configure_atime_settings() {
         esac
     done
     
-    show_message "Configurando atime=$atime_setting en el pool '$pool_name'..."
+    if [ "$SCRIPT_LANGUAGE" = "en" ]; then
+        show_message "Configuring atime=$atime_setting on pool '$pool_name'..."
+    else
+        show_message "Configurando atime=$atime_setting en el pool '$pool_name'..."
+    fi
     
     # Aplicar configuración al pool raíz
     if sudo zfs set atime="$atime_setting" "$pool_name"; then
-        show_message "✅ atime configurado como '$atime_setting' en '$pool_name'"
+        if [ "$SCRIPT_LANGUAGE" = "en" ]; then
+            show_message "✅ atime configured as '$atime_setting' on '$pool_name'"
+        else
+            show_message "✅ atime configurado como '$atime_setting' en '$pool_name'"
+        fi
     else
-        show_error "❌ Error configurando atime en '$pool_name'"
+        if [ "$SCRIPT_LANGUAGE" = "en" ]; then
+            show_error "❌ Error configuring atime on '$pool_name'"
+        else
+            show_error "❌ Error configurando atime en '$pool_name'"
+        fi
         return 1
     fi
     
     # Aplicar a todos los datasets existentes
     local datasets=$(zfs list -H -o name -r "$pool_name" 2>/dev/null | grep -v "^${pool_name}$")
     if [ -n "$datasets" ]; then
-        show_message "Aplicando configuración a datasets existentes..."
+        if [ "$SCRIPT_LANGUAGE" = "en" ]; then
+            show_message "Applying configuration to existing datasets..."
+        else
+            show_message "Aplicando configuración a datasets existentes..."
+        fi
         for dataset in $datasets; do
             if sudo zfs set atime="$atime_setting" "$dataset"; then
-                show_message "  ✅ $dataset configurado"
+                if [ "$SCRIPT_LANGUAGE" = "en" ]; then
+                    show_message "  ✅ $dataset configured"
+                else
+                    show_message "  ✅ $dataset configurado"
+                fi
             else
-                show_warning "  ⚠️  Error configurando $dataset"
+                if [ "$SCRIPT_LANGUAGE" = "en" ]; then
+                    show_warning "  ⚠️  Error configuring $dataset"
+                else
+                    show_warning "  ⚠️  Error configurando $dataset"
+                fi
             fi
         done
     fi
@@ -3578,7 +4696,11 @@ configure_atime_settings() {
     echo "   Configuración: $atime_setting ($description)"
     echo "   Aplicado a: pool y todos los datasets existentes"
     echo ""
-    echo "💡 Nota: Los nuevos datasets heredarán esta configuración automáticamente"
+    if [ "$SCRIPT_LANGUAGE" = "en" ]; then
+        echo "💡 Note: New datasets will automatically inherit this configuration"
+    else
+        echo "💡 Nota: Los nuevos datasets heredarán esta configuración automáticamente"
+    fi
 }
 
 # Función para configurar dispositivos de cache (L2ARC y SLOG)
@@ -3592,7 +4714,11 @@ setup_cache_devices() {
     echo "   🚫 Los discos mecánicos (HDD) como cache EMPEORARÁN el rendimiento"
     echo "   ✅ Los dispositivos de cache deben ser MÁS RÁPIDOS que el almacenamiento principal"
     echo ""
-    echo "💡 INFORMACIÓN SOBRE DISPOSITIVOS DE CACHE:"
+    if [ "$SCRIPT_LANGUAGE" = "en" ]; then
+        echo "💡 CACHE DEVICES INFORMATION:"
+    else
+        echo "💡 INFORMACIÓN SOBRE DISPOSITIVOS DE CACHE:"
+    fi
     echo ""
     echo "🚀 L2ARC (Level 2 Adaptive Replacement Cache):"
     echo "   • Cache de segundo nivel para lecturas frecuentes"
@@ -3610,7 +4736,11 @@ setup_cache_devices() {
     echo "   🔥 USAR DISPOSITIVOS NVME ES ALTAMENTE RECOMENDADO PARA CACHE"
     echo "   • NVMe ofrece la latencia más baja y mayor throughput"
     echo "   • Usar dispositivos lentos (USB, HDD) como cache puede EMPEORAR el rendimiento"
-    echo "   • Si no tienes NVMe disponible, considera omitir la configuración de cache"
+    if [ "$SCRIPT_LANGUAGE" = "en" ]; then
+        echo "   • If you don't have NVMe available, consider skipping cache configuration"
+    else
+        echo "   • Si no tienes NVMe disponible, considera omitir la configuración de cache"
+    fi
     echo ""
     
     # Detectar dispositivos disponibles con clasificación por tipo
@@ -3736,7 +4866,11 @@ setup_cache_devices() {
     
     # Mostrar información sobre dispositivos en uso
     if [ ${#in_use_devices[@]} -gt 0 ]; then
-        echo "💡 INFORMACIÓN SOBRE DISPOSITIVOS EN USO:"
+        if [ "$SCRIPT_LANGUAGE" = "en" ]; then
+            echo "💡 DEVICES IN USE INFORMATION:"
+        else
+            echo "💡 INFORMACIÓN SOBRE DISPOSITIVOS EN USO:"
+        fi
         echo "   • Los dispositivos marcados como 'EN USO' pueden ser limpiados y reutilizados"
         echo "   • ⚠️  ADVERTENCIA: Limpiar un dispositivo DESTRUIRÁ todos los datos"
         echo "   • Se te pedirá confirmación antes de proceder con dispositivos en uso"
@@ -3760,7 +4894,11 @@ setup_cache_devices() {
         echo ""
     elif [ ${#nvme_devices[@]} -eq 0 ] && [ ${#ssd_devices[@]} -gt 0 ]; then
         # Solo hay SSD, no NVMe - recomendación suave
-        echo "💡 RECOMENDACIÓN:"
+        if [ "$SCRIPT_LANGUAGE" = "en" ]; then
+            echo "💡 RECOMMENDATION:"
+        else
+            echo "💡 RECOMENDACIÓN:"
+        fi
         echo "   ✅ Se detectaron dispositivos SSD (aceptables para cache)"
         echo "   🚀 Para rendimiento óptimo, considera usar NVMe en el futuro"
         echo "   📊 Los SSD son adecuados para la mayoría de casos de uso"
@@ -3773,12 +4911,24 @@ setup_cache_devices() {
         return 0
     fi
     
-    echo "️  OPCIONES DE CONFIGURACIÓN:"
-    echo "   1. Configurar solo L2ARC (cache de lectura)"
-    echo "   2. Configurar solo SLOG (log de escritura)"
-    echo "   3. Configurar ambos L2ARC y SLOG"
-    echo "   4. Configurar particiones en un dispositivo (L2ARC + SLOG)"
-    echo "   5. Cancelar configuración"
+    if [ "$SCRIPT_LANGUAGE" = "en" ]; then
+        echo "️  CONFIGURATION OPTIONS:"
+    else
+        echo "️  OPCIONES DE CONFIGURACIÓN:"
+    fi
+    if [ "$SCRIPT_LANGUAGE" = "en" ]; then
+        echo "   1. Configure only L2ARC (read cache)"
+        echo "   2. Configure only SLOG (write log)"
+        echo "   3. Configure both L2ARC and SLOG"
+        echo "   4. Configure partitions on one device (L2ARC + SLOG)"
+        echo "   5. Cancel configuration"
+    else
+        echo "   1. Configurar solo L2ARC (cache de lectura)"
+        echo "   2. Configurar solo SLOG (log de escritura)"
+        echo "   3. Configurar ambos L2ARC y SLOG"
+        echo "   4. Configurar particiones en un dispositivo (L2ARC + SLOG)"
+        echo "   5. Cancelar configuración"
+    fi
     echo ""
     
     while true; do
@@ -4294,7 +5444,11 @@ setup_partitioned_cache() {
     
     show_title "Configuración de L2ARC + SLOG Particionado para '$pool_name'"
     echo ""
-    echo "💡 CONFIGURACIÓN PARTICIONADA:"
+    if [ "$SCRIPT_LANGUAGE" = "en" ]; then
+        echo "💡 PARTITION CONFIGURATION:"
+    else
+        echo "💡 CONFIGURACIÓN PARTICIONADA:"
+    fi
     echo "   Esta opción crea particiones en un solo dispositivo:"
     echo "   • 80% del espacio para L2ARC (cache de lectura)"
     echo "   • 20% del espacio para SLOG (log de escritura)"
@@ -4481,7 +5635,11 @@ setup_partitioned_cache() {
                 echo "   El pool fue creado con ashift=$pool_sector_size"
                 if [ "$pool_sector_size" -eq 0 ]; then
                     echo "   ⚠️  ashift=0 indica pool creado sin configuración óptima"
-                    echo "   💡 Para nuevos pools, el script ahora usa ashift automático"
+                    if [ "$SCRIPT_LANGUAGE" = "en" ]; then
+                        echo "   💡 For new pools, the script now uses automatic ashift"
+                    else
+                        echo "   💡 Para nuevos pools, el script ahora usa ashift automático"
+                    fi
                     echo "   � Recomendación: Recrear pool con ashift=12 para compatibilidad"
                 fi
                 echo ""
@@ -4607,7 +5765,11 @@ create_initial_snapshots() {
     
     show_title "Creación de Snapshots Iniciales"
     echo ""
-    echo "💡 Los snapshots son copias instantáneas de datasets que no ocupan espacio inicial."
+    if [ "$SCRIPT_LANGUAGE" = "en" ]; then
+        echo "💡 Snapshots are instant copies of datasets that take no initial space."
+    else
+        echo "💡 Los snapshots son copias instantáneas de datasets que no ocupan espacio inicial."
+    fi
     echo "   Son útiles para:"
     echo "   • Backups rápidos antes de cambios importantes"
     echo "   • Restauración rápida a estados anteriores"
