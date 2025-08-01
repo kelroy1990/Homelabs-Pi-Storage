@@ -2529,9 +2529,13 @@ calculate_raid_capacity() {
     if [ "$sizes_differ" = true ]; then
         show_warning "¡ATENCIÓN! Los discos tienen diferentes tamaños:"
         for i in "${!SELECTED_DISKS[@]}"; do
-            echo "  ${SELECTED_DISKS[$i]}: $(( ${disk_sizes[$i]} / 1024 / 1024 / 1024 )) GB"
+            local disk_gb=$(( ${disk_sizes[$i]} / 1024 / 1024 / 1024 ))
+            local disk_formatted=$(format_capacity "$disk_gb")
+            echo "  ${SELECTED_DISKS[$i]}: ${disk_formatted}"
         done
-        echo "Capacidad del RAID resultante: $(( RAID_CAPACITY / 1024 / 1024 / 1024 )) GB"
+        local raid_capacity_gb=$(( RAID_CAPACITY / 1024 / 1024 / 1024 ))
+        local raid_capacity_formatted=$(format_capacity "$raid_capacity_gb")
+        echo "Capacidad del RAID resultante: ${raid_capacity_formatted}"
         echo "Se utilizará el tamaño del disco más pequeño como referencia."
         
         if ! confirm "¿Deseas continuar con esta configuración?"; then
@@ -2539,6 +2543,154 @@ calculate_raid_capacity() {
             exit 0
         fi
     fi
+}
+
+# Función para formatear capacidad en la unidad más apropiada
+format_capacity() {
+    local size_gb="$1"
+    
+    if [ "$size_gb" -ge 1024 ]; then
+        local size_tb=$((size_gb / 1024))
+        local remainder=$((size_gb % 1024))
+        
+        if [ "$remainder" -eq 0 ]; then
+            echo "${size_tb}TB"
+        else
+            # Calcular decimales para mostrar X.X TB
+            local decimal=$((remainder * 10 / 1024))
+            echo "${size_tb}.${decimal}TB"
+        fi
+    else
+        echo "${size_gb}GB"
+    fi
+}
+
+# Función para mostrar vista previa de la configuración RAID
+show_raid_preview() {
+    local raid_type="$1"
+    local selected_disks=("${@:2}")
+    local num_disks=${#selected_disks[@]}
+    
+    if [ $num_disks -eq 0 ]; then
+        return 0
+    fi
+    
+    # Calcular tamaños
+    local disk_sizes=()
+    local total_raw_gb=0
+    local min_size_bytes=""
+    
+    for disk in "${selected_disks[@]}"; do
+        local size_bytes=$(lsblk -dpno SIZE "/dev/$disk" --bytes)
+        disk_sizes+=("$size_bytes")
+        
+        if [ -z "$min_size_bytes" ] || [ "$size_bytes" -lt "$min_size_bytes" ]; then
+            min_size_bytes="$size_bytes"
+        fi
+        
+        local size_gb=$((size_bytes / 1024 / 1024 / 1024))
+        total_raw_gb=$((total_raw_gb + size_gb))
+    done
+    
+    local min_size_gb=$((min_size_bytes / 1024 / 1024 / 1024))
+    local usable_gb=0
+    local redundancy_level=""
+    local failure_tolerance=""
+    local performance_note=""
+    
+    # Calcular capacidad y características según tipo de RAID
+    case "$raid_type" in
+        "raid0"|"stripe")
+            usable_gb=$total_raw_gb
+            redundancy_level="❌ SIN REDUNDANCIA"
+            failure_tolerance="⚠️  Fallo de 1 disco = PÉRDIDA TOTAL"
+            performance_note="🚀 Máximo rendimiento (lectura y escritura)"
+            ;;
+        "raid1"|"mirror")
+            usable_gb=$min_size_gb
+            redundancy_level="✅ ESPEJO COMPLETO"
+            failure_tolerance="✅ Tolera fallo de hasta $((num_disks-1)) disco(s)"
+            performance_note="⚡ Buen rendimiento de lectura, escritura normal"
+            ;;
+        "raid5"|"raidz1")
+            usable_gb=$((min_size_gb * (num_disks - 1)))
+            redundancy_level="✅ PARIDAD SIMPLE"
+            failure_tolerance="✅ Tolera fallo de 1 disco"
+            performance_note="⚡ Buen rendimiento balanceado"
+            ;;
+        "raid6"|"raidz2")
+            usable_gb=$((min_size_gb * (num_disks - 2)))
+            redundancy_level="✅ PARIDAD DOBLE"
+            failure_tolerance="✅ Tolera fallo de hasta 2 discos"
+            performance_note="⚡ Rendimiento moderado"
+            ;;
+        "raid10")
+            usable_gb=$((min_size_gb * (num_disks / 2)))
+            redundancy_level="✅ ESPEJO + STRIPING"
+            failure_tolerance="✅ Tolera fallo de 1 disco por espejo"
+            performance_note="🚀 Alto rendimiento (lectura y escritura)"
+            ;;
+        "raidz3")
+            usable_gb=$((min_size_gb * (num_disks - 3)))
+            redundancy_level="✅ PARIDAD TRIPLE"
+            failure_tolerance="✅ Tolera fallo de hasta 3 discos"
+            performance_note="⚡ Rendimiento conservador"
+            ;;
+    esac
+    
+    local efficiency=$((usable_gb * 100 / total_raw_gb))
+    
+    # Formatear capacidades
+    local min_size_formatted=$(format_capacity "$min_size_gb")
+    local total_raw_formatted=$(format_capacity "$total_raw_gb")
+    local usable_formatted=$(format_capacity "$usable_gb")
+    
+    echo ""
+    echo "🎯 CONFIGURACIÓN RAID RESULTANTE:"
+    echo "════════════════════════════════════════════════════════════════"
+    echo "📦 CAPACIDAD:"
+    echo "   Discos: $num_disks x ${min_size_formatted}"
+    echo "   Capacidad bruta total: ${total_raw_formatted}"
+    echo "   Capacidad utilizable: ${usable_formatted}"
+    echo "   Eficiencia de almacenamiento: ${efficiency}%"
+    echo ""
+    echo "🔒 PROTECCIÓN DE DATOS:"
+    echo "   $redundancy_level"
+    echo "   $failure_tolerance"
+    echo ""
+    echo "⚡ RENDIMIENTO:"
+    echo "   $performance_note"
+    
+    # Verificar si hay diferencias de tamaño significativas
+    local max_size_bytes=$(printf '%s\n' "${disk_sizes[@]}" | sort -nr | head -1)
+    local size_diff=$((max_size_bytes - min_size_bytes))
+    local size_variance=$((size_diff * 100 / max_size_bytes))
+    
+    if [ $size_variance -gt 10 ]; then
+        local max_size_gb=$((max_size_bytes / 1024 / 1024 / 1024))
+        local wasted_gb=$(((max_size_gb - min_size_gb) * num_disks))
+        
+        local min_size_formatted=$(format_capacity "$min_size_gb")
+        local max_size_formatted=$(format_capacity "$max_size_gb")
+        local wasted_formatted=$(format_capacity "$wasted_gb")
+        
+        echo ""
+        echo "⚠️  ADVERTENCIA - DIFERENCIA DE TAMAÑOS:"
+        echo "   Disco más pequeño: ${min_size_formatted}"
+        echo "   Disco más grande: ${max_size_formatted}"
+        echo "   Espacio desperdiciado: ~${wasted_formatted}"
+        echo "   💡 Se recomienda usar discos de tamaño similar"
+    fi
+    
+    # Advertencias específicas
+    if [[ "$raid_type" == "raid5" || "$raid_type" == "raid6" ]] && [ "$FILESYSTEM_TYPE" = "btrfs" ]; then
+        echo ""
+        echo "⚠️  ADVERTENCIA BTRFS:"
+        echo "   RAID 5/6 en BTRFS es EXPERIMENTAL y puede causar corrupción"
+        echo "   💡 Considera usar ZFS para RAID 5/6, o RAID 1/10 en BTRFS"
+    fi
+    
+    echo "════════════════════════════════════════════════════════════════"
 }
 
 # Función para seleccionar discos
@@ -2562,8 +2714,6 @@ select_disks() {
     echo "   Quitar selección:     Vuelve a escribir el número del disco"
     echo ""
     echo "🎯 COMANDOS ESPECIALES:"
-    echo "   'all'   - Seleccionar todos los discos libres"
-    echo "   'zfs'   - Seleccionar todos los discos ZFS (requiere confirmación)"
     echo "   'clear' - Limpiar toda la selección"
     echo "   'done'  - Finalizar selección y continuar"
     echo ""
@@ -2589,23 +2739,11 @@ select_disks() {
         echo ""
         if [ ${#SELECTED_DISKS[@]} -gt 0 ]; then
             echo "✅ Discos seleccionados (${#SELECTED_DISKS[@]}/${#AVAILABLE_DISKS[@]}): ${SELECTED_DISKS[*]}"
+            
+            # Mostrar vista previa de la configuración RAID
+            show_raid_preview "$RAID_TYPE" "${SELECTED_DISKS[@]}"
         else
             echo "⭕ Discos seleccionados: ninguno"
-        fi
-        echo ""
-        echo "💡 EJEMPLOS DE USO:"
-        if [ ${#SELECTED_DISKS[@]} -eq 0 ]; then
-            if [ "$FILESYSTEM_TYPE" = "zfs" ]; then
-                echo "   Para RAID ZFS:  escribe 'zfs' o '3 4 5 6'"
-            else
-                echo "   Para RAID BTRFS: escribe 'btrfs' o '3 4 5 6'"
-            fi
-            echo "   Para algunos:   escribe '3 4' o '3-4'"
-            echo "   Individual:     escribe '3' luego '4', etc."
-        else
-            echo "   Agregar más:    escribe '${#SELECTED_DISKS[@]}+1' o números adicionales"
-            echo "   Quitar uno:     escribe el número de un disco ya seleccionado"
-            echo "   Terminar:       escribe 'done' (necesitas ${min_disks} mínimo)"
         fi
         echo ""
         
@@ -2622,71 +2760,6 @@ select_disks() {
             SELECTED_DISK_SIZES=()
             DISKS_TO_CLEAN=()
             show_message "🧹 Selección limpiada"
-        elif [ "$choice" = "all" ]; then
-            # Seleccionar todos los discos libres
-            for i in "${!AVAILABLE_DISKS[@]}"; do
-                if [ -z "${DISK_RAID_STATUS[$i]}" ]; then
-                    disk="${AVAILABLE_DISKS[$i]}"
-                    if [[ ! " ${SELECTED_DISKS[*]} " =~ " ${disk} " ]]; then
-                        SELECTED_DISKS+=("$disk")
-                        disk_size=$(lsblk -dpno SIZE "/dev/$disk" --bytes)
-                        SELECTED_DISK_SIZES+=("$disk_size")
-                    fi
-                fi
-            done
-            show_message "✅ Se seleccionaron todos los discos libres"
-        elif [ "$choice" = "zfs" ]; then
-            # Seleccionar todos los discos ZFS con confirmación
-            local zfs_disks=()
-            for i in "${!AVAILABLE_DISKS[@]}"; do
-                if [[ "${DISK_RAID_STATUS[$i]}" == *"ZFS"* ]]; then
-                    zfs_disks+=("${AVAILABLE_DISKS[$i]}")
-                fi
-            done
-            
-            if [ ${#zfs_disks[@]} -gt 0 ]; then
-                show_warning "⚠️  Esto seleccionará todos los discos ZFS: ${zfs_disks[*]}"
-                show_warning "⚠️  Estos discos serán COMPLETAMENTE BORRADOS"
-                if confirm "¿Deseas seleccionar todos los discos ZFS?"; then
-                    for disk in "${zfs_disks[@]}"; do
-                        if [[ ! " ${SELECTED_DISKS[*]} " =~ " ${disk} " ]]; then
-                            SELECTED_DISKS+=("$disk")
-                            disk_size=$(lsblk -dpno SIZE "/dev/$disk" --bytes)
-                            SELECTED_DISK_SIZES+=("$disk_size")
-                            DISKS_TO_CLEAN+=("$disk")
-                        fi
-                    done
-                    show_message "✅ Se seleccionaron todos los discos ZFS"
-                fi
-            else
-                show_warning "❌ No hay discos ZFS disponibles"
-            fi
-        elif [ "$choice" = "btrfs" ]; then
-            # Seleccionar todos los discos BTRFS con confirmación
-            local btrfs_disks=()
-            for i in "${!AVAILABLE_DISKS[@]}"; do
-                if [[ "${DISK_RAID_STATUS[$i]}" == *"BTRFS"* ]]; then
-                    btrfs_disks+=("${AVAILABLE_DISKS[$i]}")
-                fi
-            done
-            
-            if [ ${#btrfs_disks[@]} -gt 0 ]; then
-                show_warning "⚠️  Esto seleccionará todos los discos BTRFS: ${btrfs_disks[*]}"
-                show_warning "⚠️  Estos discos serán COMPLETAMENTE BORRADOS"
-                if confirm "¿Deseas seleccionar todos los discos BTRFS?"; then
-                    for disk in "${btrfs_disks[@]}"; do
-                        if [[ ! " ${SELECTED_DISKS[*]} " =~ " ${disk} " ]]; then
-                            SELECTED_DISKS+=("$disk")
-                            disk_size=$(lsblk -dpno SIZE "/dev/$disk" --bytes)
-                            SELECTED_DISK_SIZES+=("$disk_size")
-                            DISKS_TO_CLEAN+=("$disk")
-                        fi
-                    done
-                    show_message "✅ Se seleccionaron todos los discos BTRFS"
-                fi
-            else
-                show_warning "❌ No hay discos BTRFS disponibles"
-            fi
         elif [[ "$choice" =~ ^[0-9]+(-[0-9]+)?$ ]]; then
             # Manejar rangos (ej: 3-6)
             if [[ "$choice" =~ - ]]; then
@@ -3154,20 +3227,17 @@ setup_zfs() {
                 selected_additional_disks=()
                 echo ""
                 echo "Selecciona discos para '$additional_pool_name' (mínimo $min_disks_needed):"
-                echo "Ingresa números separados por espacios (ej: 1 2 3) o 'all' para todos:"
+                echo "Ingresa números separados por espacios (ej: 1 2 3):"
                 
                 read -p "Selección: " disk_selection
                 
-                if [ "$disk_selection" = "all" ]; then
-                    selected_additional_disks=("${remaining_disks[@]}")
-                else
-                    for num in $disk_selection; do
-                        if [[ "$num" =~ ^[0-9]+$ ]] && [ "$num" -ge 1 ] && [ "$num" -le ${#remaining_disks[@]} ]; then
-                            idx=$((num-1))
-                            selected_additional_disks+=("${remaining_disks[$idx]}")
-                        fi
-                    done
-                fi
+                selected_additional_disks=()
+                for num in $disk_selection; do
+                    if [[ "$num" =~ ^[0-9]+$ ]] && [ "$num" -ge 1 ] && [ "$num" -le ${#remaining_disks[@]} ]; then
+                        idx=$((num-1))
+                        selected_additional_disks+=("${remaining_disks[$idx]}")
+                    fi
+                done
                 
                 if [ ${#selected_additional_disks[@]} -lt $min_disks_needed ]; then
                     show_error "Se necesitan al menos $min_disks_needed discos"
@@ -3289,7 +3359,9 @@ show_summary() {
         echo "ARC configurado: ${arc_size}GB"
     fi
     
-    echo "Capacidad aproximada del RAID: $(( RAID_CAPACITY / 1024 / 1024 / 1024 )) GB"
+    local raid_capacity_gb=$(( RAID_CAPACITY / 1024 / 1024 / 1024 ))
+    local raid_capacity_formatted=$(format_capacity "$raid_capacity_gb")
+    echo "Capacidad aproximada del RAID: ${raid_capacity_formatted}"
 }
 
 # Función para configurar montaje automático
