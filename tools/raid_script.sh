@@ -404,6 +404,48 @@ get_text() {
                 echo "Continue with configuration detection?"
             fi
             ;;
+        "sector_config_detected")
+            if [ "$SCRIPT_LANGUAGE" = "en" ]; then
+                echo "[INFO] 📊 Detected sector configuration:"
+            else
+                echo "[INFO] 📊 Configuración de sectores detectada:"
+            fi
+            ;;
+        "max_sector_size_hdds")
+            if [ "$SCRIPT_LANGUAGE" = "en" ]; then
+                echo "[INFO]    Maximum sector size in HDDs:"
+            else
+                echo "[INFO]    Tamaño de sector máximo en HDDs:"
+            fi
+            ;;
+        "pool_ashift")
+            if [ "$SCRIPT_LANGUAGE" = "en" ]; then
+                echo "[INFO]    Pool ashift:"
+            else
+                echo "[INFO]    Ashift del pool:"
+            fi
+            ;;
+        "compatibility_cache_devices")
+            if [ "$SCRIPT_LANGUAGE" = "en" ]; then
+                echo "[INFO]    ✅ This ensures compatibility with SSD cache devices (4096 bytes)"
+            else
+                echo "[INFO]    ✅ Esto garantiza compatibilidad con cache devices SSD (4096 bytes)"
+            fi
+            ;;
+        "config_for_pool")
+            if [ "$SCRIPT_LANGUAGE" = "en" ]; then
+                echo "[INFO] 📊 Configuration for pool"
+            else
+                echo "[INFO] 📊 Configuración para pool"
+            fi
+            ;;
+        "ensures_compatibility_future")
+            if [ "$SCRIPT_LANGUAGE" = "en" ]; then
+                echo "[INFO]    ✅ Ensures compatibility with future cache devices"
+            else
+                echo "[INFO]    ✅ Garantiza compatibilidad con cache devices futuro"
+            fi
+            ;;
         *)
             echo "$key" # Fallback to key itself
             ;;
@@ -4107,10 +4149,10 @@ setup_zfs() {
         esac
     fi
     
-    show_message "[INFO] 📊 Configuración de sectores detectada:"
-    show_message "[INFO]    Tamaño de sector máximo en HDDs: ${max_sector_size} bytes"
-    show_message "[INFO]    Ashift del pool: ${optimal_ashift} (2^${optimal_ashift} = $((2**optimal_ashift)) bytes)"
-    show_message "[INFO]    ✅ Esto garantiza compatibilidad con cache devices SSD (4096 bytes)"
+    show_message "$(get_text "sector_config_detected")"
+    show_message "$(get_text "max_sector_size_hdds") ${max_sector_size} bytes"
+    show_message "$(get_text "pool_ashift") ${optimal_ashift} (2^${optimal_ashift} = $((2**optimal_ashift)) bytes)"
+    show_message "$(get_text "compatibility_cache_devices")"
     
     # Crear el pool ZFS
     if [ "$SCRIPT_LANGUAGE" = "en" ]; then
@@ -4119,6 +4161,17 @@ setup_zfs() {
         show_message "Creando pool ZFS..."
     fi
     
+    # Preparar discos (limpiar filesystems existentes)
+    if [ "$SCRIPT_LANGUAGE" = "en" ]; then
+        show_message "Preparing disks (wiping existing filesystems)..."
+    else
+        show_message "Preparando discos (limpiando filesystems existentes)..."
+    fi
+    
+    for disk in "${SELECTED_DISKS[@]}"; do
+        clean_disk "$disk"
+    done
+    
     device_list=""
     for disk in "${SELECTED_DISKS[@]}"; do
         device_list="$device_list /dev/$disk"
@@ -4126,19 +4179,19 @@ setup_zfs() {
     
     case $RAID_TYPE in
         "stripe")
-            sudo zpool create -o ashift=$optimal_ashift "$POOL_NAME" $device_list
+            sudo zpool create -f -o ashift=$optimal_ashift "$POOL_NAME" $device_list
             ;;
         "mirror")
-            sudo zpool create -o ashift=$optimal_ashift "$POOL_NAME" mirror $device_list
+            sudo zpool create -f -o ashift=$optimal_ashift "$POOL_NAME" mirror $device_list
             ;;
         "raidz1")
-            sudo zpool create -o ashift=$optimal_ashift "$POOL_NAME" raidz $device_list
+            sudo zpool create -f -o ashift=$optimal_ashift "$POOL_NAME" raidz $device_list
             ;;
         "raidz2")
-            sudo zpool create -o ashift=$optimal_ashift "$POOL_NAME" raidz2 $device_list
+            sudo zpool create -f -o ashift=$optimal_ashift "$POOL_NAME" raidz2 $device_list
             ;;
         "raidz3")
-            sudo zpool create -o ashift=$optimal_ashift "$POOL_NAME" raidz3 $device_list
+            sudo zpool create -f -o ashift=$optimal_ashift "$POOL_NAME" raidz3 $device_list
             ;;
     esac
     
@@ -4346,10 +4399,10 @@ setup_zfs() {
                     esac
                 fi
                 
-                show_message "[INFO] 📊 Configuración para pool '$additional_pool_name':"
-                show_message "[INFO]    Tamaño de sector máximo en HDDs: ${additional_max_sector_size} bytes" 
-                show_message "[INFO]    Ashift del pool: ${additional_optimal_ashift} (2^${additional_optimal_ashift} = $((2**additional_optimal_ashift)) bytes)"
-                show_message "[INFO]    ✅ Garantiza compatibilidad con cache devices futuro"
+                show_message "$(get_text "config_for_pool") '$additional_pool_name':"
+                show_message "$(get_text "max_sector_size_hdds") ${additional_max_sector_size} bytes" 
+                show_message "$(get_text "pool_ashift") ${additional_optimal_ashift} (2^${additional_optimal_ashift} = $((2**additional_optimal_ashift)) bytes)"
+                show_message "$(get_text "ensures_compatibility_future")"
                 
                 # Limpiar discos seleccionados antes de crear el pool
                 for disk in "${selected_additional_disks[@]}"; do
@@ -4368,16 +4421,16 @@ setup_zfs() {
                 
                 case $additional_raid_type in
                     "stripe")
-                        sudo zpool create -o ashift=$additional_optimal_ashift "$additional_pool_name" $device_list
+                        sudo zpool create -f -o ashift=$additional_optimal_ashift "$additional_pool_name" $device_list
                         ;;
                     "mirror")
-                        sudo zpool create -o ashift=$additional_optimal_ashift "$additional_pool_name" mirror $device_list
+                        sudo zpool create -f -o ashift=$additional_optimal_ashift "$additional_pool_name" mirror $device_list
                         ;;
                     "raidz1")
-                        sudo zpool create -o ashift=$additional_optimal_ashift "$additional_pool_name" raidz $device_list
+                        sudo zpool create -f -o ashift=$additional_optimal_ashift "$additional_pool_name" raidz $device_list
                         ;;
                     "raidz2")
-                        sudo zpool create -o ashift=$additional_optimal_ashift "$additional_pool_name" raidz2 $device_list
+                        sudo zpool create -f -o ashift=$additional_optimal_ashift "$additional_pool_name" raidz2 $device_list
                         ;;
                 esac
                 
