@@ -16,6 +16,9 @@ import sys
 import json
 import subprocess
 import logging
+import time
+import math
+import re
 from pathlib import Path
 from typing import List, Dict, Optional, Tuple
 from dataclasses import dataclass, field
@@ -45,6 +48,8 @@ class RAIDType(Enum):
     BTRFS_RAID0 = "btrfs_raid0"
     BTRFS_RAID1 = "btrfs_raid1"
     BTRFS_RAID10 = "btrfs_raid10"
+    BTRFS_RAID5 = "btrfs_raid5"
+    BTRFS_RAID6 = "btrfs_raid6"
 
 class FilesystemType(Enum):
     """Tipos de filesystem soportados"""
@@ -150,6 +155,12 @@ class SystemManager:
     def __init__(self, console: UIConsole):
         self.console = console
         self.logger = self._setup_logging()
+        # Lista de comandos que típicamente requieren sudo
+        self.sudo_commands = {
+            'umount', 'mount', 'mkfs', 'wipefs', 'dd', 'zpool', 'zfs', 
+            'btrfs', 'mdadm', 'pvremove', 'vgchange', 'vgreduce', 'lvremove',
+            'partprobe', 'sgdisk', 'mkdir', 'chown', 'chmod'
+        }
     
     def _setup_logging(self) -> logging.Logger:
         """Configura el logging"""
@@ -172,8 +183,21 @@ class SystemManager:
         return logging.getLogger(__name__)
     
     def run_command(self, command: List[str], check: bool = True, 
-                   capture_output: bool = True, show_errors: bool = False) -> subprocess.CompletedProcess:
-        """Ejecuta un comando del sistema"""
+                   capture_output: bool = True, show_errors: bool = False,
+                   use_sudo: bool = None) -> subprocess.CompletedProcess:
+        """Ejecuta un comando del sistema con sudo automático cuando sea necesario"""
+        
+        # Determinar si necesita sudo automáticamente
+        if use_sudo is None:
+            command_name = command[0].split('/')[-1]  # Obtener nombre base del comando
+            needs_sudo = command_name in self.sudo_commands and not self.is_root()
+        else:
+            needs_sudo = use_sudo
+        
+        # Agregar sudo si es necesario
+        if needs_sudo:
+            command = ['sudo'] + command
+        
         try:
             self.logger.info(f"Ejecutando: {' '.join(command)}")
             result = subprocess.run(
@@ -189,6 +213,14 @@ class SystemManager:
                 self.console.print(f"❌ Error ejecutando comando: {e}", style="red")
             raise
     
+    def run_command_safe(self, command: List[str], show_errors: bool = False) -> bool:
+        """Ejecuta un comando de forma segura, retorna True si fue exitoso"""
+        try:
+            self.run_command(command, check=True, show_errors=show_errors)
+            return True
+        except subprocess.CalledProcessError:
+            return False
+    
     def is_root(self) -> bool:
         """Verifica si el script se ejecuta como root"""
         return os.geteuid() == 0
@@ -196,7 +228,7 @@ class SystemManager:
     def check_sudo(self) -> bool:
         """Verifica disponibilidad de sudo"""
         try:
-            self.run_command(['sudo', '-n', 'true'])
+            self.run_command(['sudo', '-n', 'true'], use_sudo=False)
             return True
         except subprocess.CalledProcessError:
             return False
@@ -246,8 +278,9 @@ class DiskManager:
                 disk_name = root_device.split('/')[-1].rstrip('0123456789')
                 system_disks.add(disk_name)
                 
-            # Otros puntos de montaje críticos
-            for mount_point in ['/boot', '/usr', '/var']:
+            # Otros puntos de montaje críticos del sistema
+            critical_mounts = ['/boot', '/usr', '/var', '/etc', '/lib', '/bin', '/sbin', '/home']
+            for mount_point in critical_mounts:
                 try:
                     result = self.system.run_command(['findmnt', '-n', '-o', 'SOURCE', mount_point])
                     device = result.stdout.strip()
@@ -256,9 +289,40 @@ class DiskManager:
                         system_disks.add(disk_name)
                 except subprocess.CalledProcessError:
                     continue
+            
+            # Detectar todos los dispositivos montados con filesystems críticos
+            try:
+                result = self.system.run_command(['findmnt', '-rn', '-o', 'SOURCE,TARGET'])
+                for line in result.stdout.strip().split('\n'):
+                    if line.strip():
+                        parts = line.split()
+                        if len(parts) >= 2:
+                            device = parts[0]
+                            mount_point = parts[1]
+                            
+                            # Si está montado en puntos críticos del sistema
+                            if any(mount_point.startswith(critical) for critical in ['/', '/boot', '/usr', '/var', '/etc']):
+                                if device.startswith('/dev/'):
+                                    disk_name = device.split('/')[-1].rstrip('0123456789')
+                                    system_disks.add(disk_name)
+            except subprocess.CalledProcessError:
+                pass
+            
+            # PROTECCIÓN CRÍTICA: Agregar TODA la familia mmcblk0 (Raspberry Pi)
+            # Esto incluye mmcblk0, mmcblk0boot0, mmcblk0boot1, mmcblk0rpmb, etc.
+            system_disks.add('mmcblk0')
+            # También proteger cualquier variante de mmcblk0
+            system_disks.add('mmcblk0boot0')
+            system_disks.add('mmcblk0boot1')
+            system_disks.add('mmcblk0rpmb')
+            
+            # Proteger otros dispositivos típicos del sistema
+            system_disks.add('nvme0n1')  # SSD NVMe del sistema
                     
         except Exception as e:
             self.console.print(f"⚠️  Error detectando discos del sistema: {e}", style="yellow")
+            # Fallback de seguridad: agregar discos típicos del sistema
+            system_disks.update(['sda', 'mmcblk0', 'mmcblk0boot0', 'mmcblk0boot1', 'mmcblk0rpmb', 'nvme0n1'])
             
         return system_disks
     
@@ -266,10 +330,6 @@ class DiskManager:
         """Parsea información de un disco desde lsblk"""
         name = device['name']
         
-        # Saltar si es disco del sistema
-        if name in system_disks:
-            return None
-            
         # Convertir tamaño a bytes
         size_str = device['size']
         size_bytes = self._parse_size(size_str)
@@ -278,6 +338,9 @@ class DiskManager:
         model = device.get('model', 'Desconocido')
         serial = device.get('serial', 'Desconocido')
         sector_size = int(device.get('phy-sec', 512))
+        
+        # Verificar si es disco del sistema
+        is_system_disk = name in system_disks
         
         # Verificar particiones y filesystems
         has_partitions = len(device.get('children', [])) > 0
@@ -290,6 +353,9 @@ class DiskManager:
                     filesystem_type = child['fstype']
                 if child.get('mountpoint'):
                     mount_points.append(child['mountpoint'])
+                    # Si tiene montajes críticos del sistema, marcarlo como sistema
+                    if child['mountpoint'] in ['/', '/boot', '/usr', '/var', '/etc', '/lib', '/bin', '/sbin']:
+                        is_system_disk = True
         
         return Disk(
             name=name,
@@ -297,6 +363,7 @@ class DiskManager:
             model=model,
             serial=serial,
             sector_size=sector_size,
+            is_system=is_system_disk,
             has_partitions=has_partitions,
             filesystem_type=filesystem_type,
             mount_points=mount_points
@@ -307,26 +374,32 @@ class DiskManager:
         if not size_str:
             return 0
             
-        size_str = size_str.upper()
+        # Normalizar formato (cambiar comas por puntos)
+        size_str = size_str.replace(',', '.').upper().strip()
+        
         multipliers = {
             'B': 1,
             'K': 1024,
             'M': 1024**2,
             'G': 1024**3,
-            'T': 1024**4
+            'T': 1024**4,
+            'P': 1024**5
         }
         
+        # Buscar sufijo
         for suffix, multiplier in multipliers.items():
             if size_str.endswith(suffix):
                 try:
-                    number = float(size_str[:-1])
+                    number_str = size_str[:-1].strip()
+                    number = float(number_str)
                     return int(number * multiplier)
                 except ValueError:
                     break
         
         # Sin sufijo, asumir bytes
         try:
-            return int(size_str)
+            # Intentar parsear como número directo
+            return int(float(size_str))
         except ValueError:
             return 0
 
@@ -424,27 +497,73 @@ class RAIDManager:
             title="🧙‍♂️ Asistente RAID"
         )
         
-        # Detectar discos disponibles
+        # Verificar permisos
+        if not self.system.is_root() and not self.system.check_sudo():
+            self.console.print("⚠️  Se requieren permisos de administrador para crear RAID", style="yellow")
+            if not self.console.confirm("¿Continuar de todas formas?", default=False):
+                return
+        
+        # Paso 1: Detectar discos disponibles
+        self.console.print_panel("Paso 1: Detectando discos disponibles", title="🔍 Detección")
         disks = self.disk_manager.detect_disks()
-        available_disks = [d for d in disks if not d.is_system and not d.has_partitions]
+        available_disks = [d for d in disks if not d.is_system]
         
         if not available_disks:
             self.console.print("❌ No hay discos disponibles para RAID", style="red")
+            self.console.print("💡 Todos los discos detectados son del sistema o están en uso crítico", style="blue")
+            
+            # Mostrar discos del sistema detectados para información
+            system_disks = [d for d in disks if d.is_system]
+            if system_disks:
+                self.console.print("\n🔒 Discos del sistema detectados (protegidos):")
+                for disk in system_disks:
+                    mount_info = f" (montajes: {', '.join(disk.mount_points)})" if disk.mount_points else ""
+                    self.console.print(f"   • {disk.name} - {disk.size_human}{mount_info}")
+            
             return
         
-        # Mostrar discos disponibles
+        # Mostrar discos detectados
         self._show_available_disks(available_disks)
         
-        # Seleccionar tipo de filesystem
+        # Paso 2: Seleccionar tipo de filesystem
+        self.console.print_panel("Paso 2: Seleccionando tipo de filesystem", title="🗂️ Filesystem")
         fs_type = self._select_filesystem_type()
         
-        # Seleccionar discos
-        selected_disks = self._select_disks(available_disks)
+        # Paso 3 y 4: Bucle para selección de discos y tipo de RAID
+        while True:
+            # Paso 3: Seleccionar discos
+            self.console.print_panel("Paso 3: Seleccionando discos para el RAID", title="💾 Selección")
+            selected_disks = self._select_disks(available_disks)
+            
+            if not selected_disks:
+                self.console.print("❌ Operación cancelada", style="yellow")
+                return
+            
+            # Paso 4: Seleccionar tipo de RAID
+            self.console.print_panel("Paso 4: Seleccionando tipo de RAID", title="⚙️ Configuración")
+            raid_type = self._select_raid_type(fs_type, len(selected_disks))
+            
+            # Si raid_type es None, significa que quiere volver a selección de discos
+            if raid_type is None:
+                self.console.print("↩️  Volviendo a selección de discos...", style="blue")
+                continue
+            else:
+                break  # Salir del bucle si se seleccionó un tipo válido
         
-        # Seleccionar tipo de RAID
-        raid_type = self._select_raid_type(fs_type, len(selected_disks))
+        # Paso 5: Cálculo de capacidad y confirmación
+        self.console.print_panel("Paso 5: Resumen y confirmación", title="📋 Confirmación")
+        capacity_info = self._calculate_raid_capacity(raid_type, selected_disks)
         
-        # Configuración final
+        # Mostrar resumen
+        self._show_raid_summary(fs_type, raid_type, selected_disks, capacity_info)
+        
+        # Confirmación final
+        if not self.console.confirm("¿Proceder con la creación del RAID?", default=False):
+            self.console.print("❌ Operación cancelada", style="yellow")
+            return
+        
+        # Paso 6: Ejecución
+        self.console.print_panel("Paso 6: Creando RAID", title="🔨 Ejecución")
         self._configure_raid(fs_type, raid_type, selected_disks)
     
     def _detect_zfs_pools(self):
@@ -1123,18 +1242,2029 @@ class RAIDManager:
     
     def _select_disks(self, available_disks: List[Disk]) -> List[Disk]:
         """Selecciona discos para el RAID"""
-        # Implementar lógica de selección de discos
-        pass
+        self.console.print("\n💾 Selección de discos para RAID:")
+        
+        selected_disks = []
+        
+        while True:
+            # Mostrar tabla actualizada con selecciones
+            self._show_disk_selection_table(available_disks, selected_disks)
+            
+            self.console.print(f"\n📋 Discos seleccionados: {len(selected_disks)}")
+            if selected_disks:
+                selected_names = [f"{disk.name} ({disk.size_human})" for disk in selected_disks]
+                self.console.print(f"   ✅ {', '.join(selected_names)}")
+            
+            self.console.print("\nOpciones:")
+            self.console.print("   • Números separados por espacios (ej: 1 3 4) para agregar/quitar")
+            self.console.print("   • 'c' para continuar con la selección actual")
+            self.console.print("   • 'q' para cancelar")
+            
+            choice = self.console.prompt("👉 Selección", "c").strip().lower()
+            
+            if choice == 'c':
+                if len(selected_disks) < 2:
+                    self.console.print("❌ Necesitas al menos 2 discos para RAID", style="red")
+                    continue
+                
+                # Verificar advertencias sobre datos existentes solo al final
+                disks_with_data = [d for d in selected_disks if d.has_partitions or d.filesystem_type]
+                if disks_with_data:
+                    self.console.print("\n⚠️  ADVERTENCIA: Los siguientes discos seleccionados contienen datos:", style="yellow")
+                    for disk in disks_with_data:
+                        warnings = []
+                        if disk.has_partitions:
+                            warnings.append("particiones")
+                        if disk.filesystem_type:
+                            warnings.append(f"filesystem {disk.filesystem_type}")
+                        self.console.print(f"   • {disk.name} - {', '.join(warnings)}")
+                    
+                    self.console.print("🚨 La creación de RAID DESTRUIRÁ todos los datos existentes", style="red")
+                    if not self.console.confirm("¿Continuar de todas formas?", default=False):
+                        continue
+                
+                break
+            elif choice == 'q':
+                return []
+            else:
+                # Parsear números múltiples
+                try:
+                    disk_numbers = [int(x.strip()) for x in choice.split() if x.strip().isdigit()]
+                    
+                    for disk_num in disk_numbers:
+                        disk_index = disk_num - 1
+                        if 0 <= disk_index < len(available_disks):
+                            disk = available_disks[disk_index]
+                            
+                            if disk in selected_disks:
+                                selected_disks.remove(disk)
+                                self.console.print(f"➖ Disco {disk.name} eliminado de la selección", style="yellow")
+                            else:
+                                selected_disks.append(disk)
+                                self.console.print(f"➕ Disco {disk.name} agregado a la selección", style="green")
+                        else:
+                            self.console.print(f"❌ Número de disco inválido: {disk_num}", style="red")
+                    
+                    if not disk_numbers:
+                        self.console.print("❌ Entrada inválida. Usa números separados por espacios", style="red")
+                        
+                except ValueError:
+                    self.console.print("❌ Entrada inválida. Usa números separados por espacios", style="red")
+        
+        return selected_disks
+    
+    def _show_disk_selection_table(self, available_disks: List[Disk], selected_disks: List[Disk]):
+        """Muestra tabla de selección de discos con estado de selección"""
+        if RICH_AVAILABLE:
+            table = Table(title="🎯 Selección de Discos para RAID")
+            table.add_column("Sel", style="bold green", width=4, justify="center")
+            table.add_column("#", style="bold cyan", width=3)
+            table.add_column("Disco", style="cyan")
+            table.add_column("Tamaño", style="green")
+            table.add_column("Modelo", style="yellow")
+            table.add_column("Estado", style="blue")
+            
+            for i, disk in enumerate(available_disks, 1):
+                # Verificar si está seleccionado
+                is_selected = disk in selected_disks
+                selection_mark = "✅" if is_selected else "⬜"
+                
+                # Verificar estado del disco
+                status_parts = []
+                if disk.has_partitions:
+                    status_parts.append("🟡 Particiones")
+                if disk.filesystem_type:
+                    status_parts.append(f"🔵 {disk.filesystem_type}")
+                
+                status = " + ".join(status_parts) if status_parts else "🟢 Libre"
+                
+                table.add_row(
+                    selection_mark,
+                    str(i),
+                    disk.name,
+                    disk.size_human,
+                    disk.model,
+                    status
+                )
+            
+            self.console.console.print(table)
+        else:
+            print("\n🎯 Selección de Discos para RAID:")
+            for i, disk in enumerate(available_disks, 1):
+                is_selected = disk in selected_disks
+                mark = "[✓]" if is_selected else "[ ]"
+                
+                status_parts = []
+                if disk.has_partitions:
+                    status_parts.append("Particiones")
+                if disk.filesystem_type:
+                    status_parts.append(disk.filesystem_type)
+                
+                status = " + ".join(status_parts) if status_parts else "Libre"
+                
+                print(f"  {mark} {i}. {disk.name} - {disk.size_human} - {disk.model} ({status})")
     
     def _select_raid_type(self, fs_type: FilesystemType, disk_count: int) -> RAIDType:
         """Selecciona tipo de RAID según filesystem y número de discos"""
-        # Implementar lógica de selección de RAID
-        pass
+        self.console.print(f"\n⚙️ Selección de tipo RAID para {fs_type.value.upper()}")
+        self.console.print(f"📊 Discos disponibles: {disk_count}")
+        
+        if fs_type == FilesystemType.ZFS:
+            return self._select_zfs_raid_type(disk_count)
+        else:
+            return self._select_btrfs_raid_type(disk_count)
+    
+    def _select_zfs_raid_type(self, disk_count: int) -> RAIDType:
+        """Selecciona tipo de RAID para ZFS"""
+        self.console.print("\n🔷 Tipos de RAID disponibles en ZFS:")
+        
+        options = []
+        
+        # Stripe (sin redundancia)
+        options.append((1, RAIDType.STRIPE, "Stripe - Sin redundancia, máximo rendimiento"))
+        
+        # Mirror (requiere 2+ discos)
+        if disk_count >= 2:
+            options.append((2, RAIDType.MIRROR, "Mirror - Datos duplicados (50% capacidad)"))
+        
+        # RAIDZ1 (requiere 3+ discos)
+        if disk_count >= 3:
+            options.append((3, RAIDType.RAIDZ1, "RAIDZ1 - Tolerancia a 1 fallo (equivalente RAID 5)"))
+        
+        # RAIDZ2 (requiere 4+ discos)  
+        if disk_count >= 4:
+            options.append((4, RAIDType.RAIDZ2, "RAIDZ2 - Tolerancia a 2 fallos (equivalente RAID 6)"))
+        
+        # RAIDZ3 (requiere 5+ discos)
+        if disk_count >= 5:
+            options.append((5, RAIDType.RAIDZ3, "RAIDZ3 - Tolerancia a 3 fallos"))
+        
+        # Mostrar opciones
+        for num, raid_type, description in options:
+            self.console.print(f"   {num}. {description}")
+        
+        # Opción para volver a selección de discos
+        self.console.print(f"   0. ← Volver a selección de discos")
+        
+        while True:
+            choice = self.console.prompt("👉 Selecciona tipo de RAID", "2" if disk_count >= 2 else "1")
+            
+            if choice == "0":
+                return None  # Señal para volver a selección de discos
+            
+            for num, raid_type, description in options:
+                if choice == str(num):
+                    return raid_type
+            
+            self.console.print("❌ Opción inválida", style="red")
+    
+    def _select_btrfs_raid_type(self, disk_count: int) -> RAIDType:
+        """Selecciona tipo de RAID para BTRFS"""
+        self.console.print("\n🌿 Tipos de RAID disponibles en BTRFS:")
+        
+        options = []
+        
+        # RAID 0
+        options.append((1, RAIDType.BTRFS_RAID0, "RAID 0 - Sin redundancia, máximo rendimiento"))
+        
+        # RAID 1 (requiere 2+ discos)
+        if disk_count >= 2:
+            options.append((2, RAIDType.BTRFS_RAID1, "RAID 1 - Datos duplicados (50% capacidad)"))
+        
+        # RAID 10 (requiere 4+ discos)
+        if disk_count >= 4:
+            options.append((3, RAIDType.BTRFS_RAID10, "RAID 10 - Combinación RAID 0+1 (requiere 4+ discos)"))
+        
+        # RAID 5 (requiere 3+ discos) - EXPERIMENTAL
+        if disk_count >= 3:
+            options.append((4, RAIDType.BTRFS_RAID5, "RAID 5 - Tolerancia a 1 fallo ⚠️ EXPERIMENTAL"))
+        
+        # RAID 6 (requiere 4+ discos) - EXPERIMENTAL  
+        if disk_count >= 4:
+            options.append((5, RAIDType.BTRFS_RAID6, "RAID 6 - Tolerancia a 2 fallos ⚠️ EXPERIMENTAL"))
+        
+        # Mostrar opciones
+        for num, raid_type, description in options:
+            self.console.print(f"   {num}. {description}")
+        
+        # Advertencia sobre RAID 5/6 experimental
+        if disk_count >= 3:
+            self.console.print("\n⚠️  ADVERTENCIA: RAID 5/6 en BTRFS es experimental", style="yellow")
+            self.console.print("   • Puede tener problemas de estabilidad y rendimiento", style="yellow")
+            self.console.print("   • No recomendado para sistemas de producción críticos", style="yellow")
+        
+        # Opción para volver a selección de discos
+        self.console.print(f"\n   0. ← Volver a selección de discos")
+        
+        while True:
+            choice = self.console.prompt("👉 Selecciona tipo de RAID", "2" if disk_count >= 2 else "1")
+            
+            if choice == "0":
+                return None  # Señal para volver a selección de discos
+            
+            for num, raid_type, description in options:
+                if choice == str(num):
+                    return raid_type
+            
+            self.console.print("❌ Opción inválida", style="red")
     
     def _configure_raid(self, fs_type: FilesystemType, raid_type: RAIDType, disks: List[Disk]):
         """Configura el RAID con los parámetros seleccionados"""
-        # Implementar configuración de RAID
-        pass
+        self.console.print("🔨 Iniciando configuración del RAID...", style="bold blue")
+        
+        # Verificar permisos de root - sin pedir confirmación, usar sudo directamente
+        if not self.system.is_root():
+            self.console.print("🔐 Se ejecutarán comandos con sudo según sea necesario", style="blue")
+        
+        try:
+            # Paso 1: Limpieza de discos (ejecutar sin confirmaciones adicionales)
+            self._clean_disks(disks)
+            
+            # Paso 2: Crear RAID según el tipo de filesystem
+            if fs_type == FilesystemType.ZFS:
+                self._create_zfs_raid(raid_type, disks)
+            else:
+                self._create_btrfs_raid(raid_type, disks)
+            
+            # Paso 3: Configurar montaje automático
+            self._configure_auto_mount(fs_type, raid_type, disks)
+            
+            # Paso 4: Mostrar resumen final
+            self._show_final_summary(fs_type, raid_type, disks)
+            
+        except Exception as e:
+            self.console.print(f"❌ Error durante la configuración: {e}", style="red")
+            self.console.print("🔄 Revirtiendo cambios...", style="yellow")
+            # Aquí podríamos implementar rollback si es necesario
+            raise
+    
+    def _calculate_raid_capacity(self, raid_type: RAIDType, disks: List[Disk]) -> Dict[str, str]:
+        """Calcula la capacidad del RAID según tipo y discos"""
+        if not disks:
+            return {"total": "0 GB", "usable": "0 GB", "redundancy": "Ninguna"}
+        
+        # Encontrar disco más pequeño
+        min_size = min(disk.size for disk in disks)
+        total_raw = sum(disk.size for disk in disks)
+        disk_count = len(disks)
+        
+        # Calcular según tipo de RAID
+        if raid_type in [RAIDType.STRIPE, RAIDType.BTRFS_RAID0]:
+            usable_size = total_raw
+            redundancy = "Ninguna - Sin tolerancia a fallos"
+            efficiency = "100%"
+            
+        elif raid_type in [RAIDType.MIRROR, RAIDType.BTRFS_RAID1]:
+            usable_size = min_size * (disk_count // 2)
+            redundancy = f"Tolerancia a {disk_count // 2} fallos"
+            efficiency = f"{((disk_count // 2) / disk_count) * 100:.1f}%"
+            
+        elif raid_type == RAIDType.RAIDZ1:
+            usable_size = min_size * (disk_count - 1)
+            redundancy = "Tolerancia a 1 fallo"
+            efficiency = f"{((disk_count - 1) / disk_count) * 100:.1f}%"
+            
+        elif raid_type == RAIDType.RAIDZ2:
+            usable_size = min_size * (disk_count - 2)
+            redundancy = "Tolerancia a 2 fallos"
+            efficiency = f"{((disk_count - 2) / disk_count) * 100:.1f}%"
+            
+        elif raid_type == RAIDType.RAIDZ3:
+            usable_size = min_size * (disk_count - 3)
+            redundancy = "Tolerancia a 3 fallos"
+            efficiency = f"{((disk_count - 3) / disk_count) * 100:.1f}%"
+            
+        elif raid_type == RAIDType.BTRFS_RAID10:
+            usable_size = min_size * (disk_count // 2)
+            redundancy = "Tolerancia múltiple (RAID 0+1)"
+            efficiency = "50%"
+            
+        elif raid_type == RAIDType.BTRFS_RAID5:
+            usable_size = min_size * (disk_count - 1)
+            redundancy = "Tolerancia a 1 fallo (EXPERIMENTAL)"
+            efficiency = f"{((disk_count - 1) / disk_count) * 100:.1f}%"
+            
+        elif raid_type == RAIDType.BTRFS_RAID6:
+            usable_size = min_size * (disk_count - 2)
+            redundancy = "Tolerancia a 2 fallos (EXPERIMENTAL)"
+            efficiency = f"{((disk_count - 2) / disk_count) * 100:.1f}%"
+            
+        else:
+            usable_size = total_raw
+            redundancy = "Desconocida"
+            efficiency = "N/A"
+        
+        # Convertir a formato legible
+        def size_to_human(size_bytes: int) -> str:
+            for unit in ['B', 'KB', 'MB', 'GB', 'TB']:
+                if size_bytes < 1024:
+                    return f"{size_bytes:.1f} {unit}"
+                size_bytes /= 1024
+            return f"{size_bytes:.1f} PB"
+        
+        return {
+            "total": size_to_human(total_raw),
+            "usable": size_to_human(usable_size),
+            "redundancy": redundancy,
+            "efficiency": efficiency,
+            "min_disk": size_to_human(min_size)
+        }
+    
+    def _show_raid_summary(self, fs_type: FilesystemType, raid_type: RAIDType, 
+                          disks: List[Disk], capacity_info: Dict[str, str]):
+        """Muestra resumen de la configuración RAID"""
+        if RICH_AVAILABLE:
+            # Crear tabla de resumen
+            summary_table = Table(title="📋 Resumen de Configuración RAID", show_header=False)
+            summary_table.add_column("Concepto", style="bold cyan", width=20)
+            summary_table.add_column("Valor", style="white")
+            
+            summary_table.add_row("Filesystem", fs_type.value.upper())
+            summary_table.add_row("Tipo RAID", raid_type.value)
+            summary_table.add_row("Número de discos", str(len(disks)))
+            summary_table.add_row("Capacidad total", capacity_info["total"])
+            summary_table.add_row("Capacidad utilizable", capacity_info["usable"])
+            summary_table.add_row("Eficiencia", capacity_info["efficiency"])
+            summary_table.add_row("Redundancia", capacity_info["redundancy"])
+            
+            self.console.console.print(summary_table)
+            
+            # Crear tabla de discos
+            disks_table = Table(title="💾 Discos Seleccionados", show_header=True)
+            disks_table.add_column("Disco", style="cyan")
+            disks_table.add_column("Tamaño", style="green")
+            disks_table.add_column("Modelo", style="yellow")
+            disks_table.add_column("Sectores", style="blue")
+            
+            for disk in disks:
+                disks_table.add_row(
+                    disk.name,
+                    disk.size_human,
+                    disk.model,
+                    str(disk.sector_size)
+                )
+            
+            self.console.console.print(disks_table)
+            
+        else:
+            print("\n📋 Resumen de Configuración RAID:")
+            print(f"   Filesystem: {fs_type.value.upper()}")
+            print(f"   Tipo RAID: {raid_type.value}")
+            print(f"   Discos: {len(disks)}")
+            print(f"   Capacidad total: {capacity_info['total']}")
+            print(f"   Capacidad utilizable: {capacity_info['usable']}")
+            print(f"   Redundancia: {capacity_info['redundancy']}")
+            
+            print("\n💾 Discos seleccionados:")
+            for disk in disks:
+                print(f"   • {disk.name} - {disk.size_human} - {disk.model}")
+        
+        # Advertencias específicas
+        warnings = []
+        
+        if raid_type in [RAIDType.STRIPE, RAIDType.BTRFS_RAID0]:
+            warnings.append("⚠️  Sin redundancia: la pérdida de cualquier disco significa pérdida total de datos")
+        
+        if fs_type == FilesystemType.BTRFS and "raid" in raid_type.value:
+            warnings.append("⚠️  BTRFS RAID puede requerir configuración adicional después de la creación")
+        
+        if raid_type in [RAIDType.BTRFS_RAID5, RAIDType.BTRFS_RAID6]:
+            warnings.append("🚨 RAID 5/6 en BTRFS es EXPERIMENTAL - no recomendado para producción")
+            warnings.append("⚠️  Riesgo de corrupción de datos durante reconstrucción en RAID 5/6")
+        
+        # Verificar si los discos tienen tamaños muy diferentes
+        sizes = [disk.size for disk in disks]
+        if max(sizes) > min(sizes) * 1.5:  # Si hay más de 50% de diferencia
+            warnings.append("⚠️  Los discos tienen tamaños muy diferentes - se usará el tamaño del más pequeño")
+        
+        if warnings:
+            self.console.print("\n🚨 Advertencias importantes:")
+            for warning in warnings:
+                self.console.print(f"   {warning}", style="yellow")
+    
+    def _clean_disks(self, disks: List[Disk]):
+        """Limpia los discos antes de crear el RAID"""
+        self.console.print_panel("Analizando y limpiando discos seleccionados", title="🧹 Preparación")
+        
+        for disk in disks:
+            self.console.print(f"🔍 Analizando disco {disk.name}...")
+            
+            try:
+                # 1. Detectar qué tipo de configuración tiene el disco
+                disk_info = self._analyze_disk_configuration(disk.name)
+                
+                # 2. Mostrar información encontrada automáticamente
+                if disk_info['has_data']:
+                    self.console.print(f"   📋 Configuración detectada en {disk.name}:")
+                    for info in disk_info['details']:
+                        self.console.print(f"      • {info}")
+                    
+                    # 3. Limpiar automáticamente sin preguntar (como el script bash)
+                    self.console.print(f"   🧹 Procediendo con limpieza automática...")
+                    self._perform_disk_cleanup(disk.name, disk_info)
+                else:
+                    self.console.print(f"   ✅ Disco {disk.name} está limpio")
+                
+                self.console.print(f"✅ Disco {disk.name} preparado correctamente", style="green")
+                
+            except Exception as e:
+                self.console.print(f"⚠️  Advertencia preparando disco {disk.name}: {e}", style="yellow")
+                # Continuar con el siguiente disco en lugar de fallar completamente
+                self.console.print(f"   🔄 Continuando con limpieza básica...", style="blue")
+                try:
+                    self._wipe_disk_completely(disk.name)
+                    self.console.print(f"✅ Limpieza básica completada para {disk.name}", style="green")
+                except Exception as e2:
+                    self.console.print(f"❌ Error crítico con disco {disk.name}: {e2}", style="red")
+                    raise
+    
+    def _analyze_disk_configuration(self, disk_name: str) -> Dict:
+        """Analiza la configuración actual de un disco"""
+        info = {
+            'has_data': False,
+            'details': [],
+            'zfs_pools': [],
+            'btrfs_filesystems': [],
+            'mdadm_arrays': [],
+            'lvm_volumes': [],
+            'mounted_partitions': [],
+            'partitions': []
+        }
+        
+        device_path = f"/dev/{disk_name}"
+        
+        # 1. Verificar particiones
+        try:
+            result = self.system.run_command(['lsblk', '-n', '-o', 'NAME,MOUNTPOINT,FSTYPE', device_path])
+            for line in result.stdout.strip().split('\n'):
+                if line.strip():
+                    parts = line.split()
+                    if len(parts) >= 1:
+                        part_name = parts[0].strip()
+                        mountpoint = parts[1].strip() if len(parts) > 1 and parts[1] != '' else None
+                        fstype = parts[2].strip() if len(parts) > 2 and parts[2] != '' else None
+                        
+                        if part_name != disk_name:  # Es una partición
+                            info['partitions'].append(part_name)
+                            info['has_data'] = True
+                            
+                            if mountpoint and mountpoint != '':
+                                info['mounted_partitions'].append(f"/dev/{part_name} en {mountpoint}")
+                                info['details'].append(f"Partición {part_name} montada en {mountpoint}")
+                            elif fstype:
+                                info['details'].append(f"Partición {part_name} con filesystem {fstype}")
+                            else:
+                                info['details'].append(f"Partición {part_name}")
+        except subprocess.CalledProcessError:
+            pass
+        
+        # 2. Verificar si forma parte de pools ZFS
+        try:
+            self.system.run_command(['which', 'zpool'])
+            result = self.system.run_command(['zpool', 'status'])
+            
+            current_pool = None
+            for line in result.stdout.split('\n'):
+                line = line.strip()
+                if line.startswith('pool:'):
+                    current_pool = line.split('pool:')[1].strip()
+                elif current_pool and (disk_name in line or any(f"{disk_name}p{i}" in line for i in range(1, 10))):
+                    if current_pool not in info['zfs_pools']:
+                        info['zfs_pools'].append(current_pool)
+                        info['has_data'] = True
+                        info['details'].append(f"Miembro del pool ZFS '{current_pool}'")
+        except subprocess.CalledProcessError:
+            pass
+        
+        # 3. Verificar si forma parte de filesystems BTRFS
+        try:
+            self.system.run_command(['which', 'btrfs'])
+            result = self.system.run_command(['btrfs', 'filesystem', 'show'])
+            
+            current_uuid = None
+            current_label = None
+            for line in result.stdout.split('\n'):
+                if 'uuid:' in line:
+                    current_uuid = line.split('uuid:')[1].strip()
+                    current_label = None
+                elif 'Label:' in line:
+                    current_label = line.split('Label:')[1].strip().replace("'", "")
+                elif 'devid' in line and device_path in line:
+                    fs_name = current_label if current_label else f"UUID {current_uuid[:8]}..."
+                    info['btrfs_filesystems'].append(fs_name)
+                    info['has_data'] = True
+                    info['details'].append(f"Miembro del filesystem BTRFS '{fs_name}'")
+        except subprocess.CalledProcessError:
+            pass
+        
+        # 4. Verificar arrays MDADM
+        try:
+            result = self.system.run_command(['cat', '/proc/mdstat'])
+            for line in result.stdout.split('\n'):
+                if 'active' in line and disk_name in line:
+                    # Extraer nombre del array
+                    array_name = line.split(':')[0].strip()
+                    info['mdadm_arrays'].append(array_name)
+                    info['has_data'] = True
+                    info['details'].append(f"Miembro del array MDADM '{array_name}'")
+        except subprocess.CalledProcessError:
+            pass
+        
+        # 5. Verificar Volume Groups LVM
+        try:
+            self.system.run_command(['which', 'pvs'])
+            result = self.system.run_command(['pvs', '--noheadings', '-o', 'pv_name,vg_name'])
+            for line in result.stdout.strip().split('\n'):
+                if line.strip() and device_path in line:
+                    parts = line.split()
+                    if len(parts) >= 2:
+                        vg_name = parts[1]
+                        info['lvm_volumes'].append(vg_name)
+                        info['has_data'] = True
+                        info['details'].append(f"Physical Volume en VG '{vg_name}'")
+        except subprocess.CalledProcessError:
+            pass
+        
+        return info
+    
+    def _perform_disk_cleanup(self, disk_name: str, disk_info: Dict):
+        """Realiza la limpieza del disco según la configuración detectada"""
+        if not disk_info['has_data']:
+            self.console.print(f"   ✅ Disco {disk_name} ya está limpio")
+            return
+        
+        # 1. Desmontar particiones montadas
+        if disk_info['mounted_partitions']:
+            self.console.print(f"   📤 Desmontando particiones...")
+            for partition_info in disk_info['mounted_partitions']:
+                partition = partition_info.split(' en ')[0]  # Extraer solo el dispositivo
+                self.console.print(f"      • Desmontando {partition}")
+                
+                # Intentar desmontaje normal
+                if not self.system.run_command_safe(['umount', partition]):
+                    # Intentar desmontaje forzado
+                    if self.system.run_command_safe(['umount', '-f', partition]):
+                        self.console.print(f"      ✅ Desmontado forzadamente {partition}")
+                    else:
+                        self.console.print(f"      ⚠️  No se pudo desmontar {partition}, continuando...")
+                else:
+                    self.console.print(f"      ✅ Desmontado {partition}")
+        
+        # 2. Destruir pools ZFS
+        if disk_info['zfs_pools']:
+            self.console.print(f"   🔷 Destruyendo pools ZFS...")
+            for pool in disk_info['zfs_pools']:
+                self.console.print(f"      • Destruyendo pool {pool}")
+                
+                # Exportar pool primero (sin falla si ya está exportado)
+                self.system.run_command_safe(['zpool', 'export', pool])
+                
+                # Destruir pool con fuerza
+                if self.system.run_command_safe(['zpool', 'destroy', '-f', pool]):
+                    self.console.print(f"      ✅ Pool {pool} destruido")
+                else:
+                    self.console.print(f"      ⚠️  Error destruyendo pool {pool}, continuando...")
+        
+        # 3. Limpiar filesystems BTRFS (desmontaje automático)
+        if disk_info['btrfs_filesystems']:
+            self.console.print(f"   🌿 Limpiando filesystems BTRFS...")
+            device_path = f"/dev/{disk_name}"
+            try:
+                # Buscar y desmontar puntos de montaje BTRFS
+                result = self.system.run_command(['findmnt', '-t', 'btrfs', '-n', '-o', 'TARGET,SOURCE'], check=False)
+                if result.returncode == 0:
+                    for line in result.stdout.strip().split('\n'):
+                        if line.strip() and device_path in line:
+                            mountpoint = line.split()[0]
+                            if self.system.run_command_safe(['umount', mountpoint]):
+                                self.console.print(f"      ✅ Desmontado BTRFS en {mountpoint}")
+                            elif self.system.run_command_safe(['umount', '-f', mountpoint]):
+                                self.console.print(f"      ✅ Desmontado BTRFS forzadamente en {mountpoint}")
+                            else:
+                                self.console.print(f"      ⚠️  No se pudo desmontar {mountpoint}")
+            except subprocess.CalledProcessError:
+                pass  # No hay filesystems BTRFS montados
+        
+        # 4. Parar arrays MDADM
+        if disk_info['mdadm_arrays']:
+            self.console.print(f"   ⚡ Parando arrays MDADM...")
+            for array in disk_info['mdadm_arrays']:
+                self.console.print(f"      • Parando array {array}")
+                if self.system.run_command_safe(['mdadm', '--stop', f"/dev/{array}"]):
+                    self.console.print(f"      ✅ Array {array} parado")
+                else:
+                    self.console.print(f"      ⚠️  Error parando array {array}, continuando...")
+        
+        # 5. Remover de Volume Groups LVM
+        if disk_info['lvm_volumes']:
+            self.console.print(f"   💼 Removiendo de Volume Groups LVM...")
+            device_path = f"/dev/{disk_name}"
+            for vg in disk_info['lvm_volumes']:
+                # Desactivar VG primero
+                self.system.run_command_safe(['vgchange', '-an', vg])
+                
+                # Remover PV del VG
+                self.system.run_command_safe(['vgreduce', vg, device_path])
+                
+                # Remover PV completamente con fuerza
+                if self.system.run_command_safe(['pvremove', '-ff', device_path]):
+                    self.console.print(f"      ✅ PV removido del VG {vg}")
+                else:
+                    self.console.print(f"      ⚠️  Error removiendo PV de {vg}, continuando...")
+        
+        # 6. Limpiar completamente el disco
+        self.console.print(f"   🧽 Limpiando todos los metadatos...")
+        self._wipe_disk_completely(disk_name)
+    
+    def _wipe_disk_completely(self, disk_name: str):
+        """Limpia completamente un disco de todos los metadatos"""
+        device_path = f"/dev/{disk_name}"
+        
+        # 1. Limpiar etiquetas ZFS si es posible
+        try:
+            self.system.run_command(['which', 'zpool'], check=False)
+            if self.system.run_command_safe(['zpool', 'labelclear', '-f', device_path]):
+                self.console.print(f"      ✅ Etiquetas ZFS limpiadas")
+        except subprocess.CalledProcessError:
+            pass  # ZFS no disponible
+        
+        # 2. Limpiar metadatos MDADM
+        if self.system.run_command_safe(['mdadm', '--zero-superblock', device_path]):
+            self.console.print(f"      ✅ Metadatos MDADM limpiados")
+        
+        # 3. Usar wipefs para limpiar todas las firmas de filesystem
+        self.console.print(f"      • Limpiando firmas de filesystem...")
+        if self.system.run_command_safe(['wipefs', '-af', device_path]):
+            self.console.print(f"      ✅ Firmas de filesystem limpiadas")
+        else:
+            self.console.print(f"      ⚠️  Error con wipefs, usando método alternativo...")
+        
+        # 4. Limpiar primeros sectores con dd (como en script bash)
+        self.console.print(f"      • Limpiando primeros 100MB...")
+        if self.system.run_command_safe(['dd', 'if=/dev/zero', f'of={device_path}', 'bs=1M', 'count=100', 'conv=fsync']):
+            self.console.print(f"      ✅ Primeros sectores limpiados")
+        else:
+            self.console.print(f"      ⚠️  Error limpiando primeros sectores")
+        
+        # 5. Limpiar últimos sectores (metadatos al final del disco)
+        try:
+            self.console.print(f"      • Limpiando últimos sectores...")
+            # Obtener tamaño del disco en bytes
+            result = self.system.run_command(['lsblk', '-dpno', 'SIZE', device_path, '--bytes'], check=False)
+            if result.returncode == 0:
+                disk_size = int(result.stdout.strip())
+                
+                if disk_size > 104857600:  # Mayor a 100MB
+                    seek_mb = (disk_size // 1048576) - 100  # 100MB antes del final
+                    if self.system.run_command_safe(['dd', 'if=/dev/zero', f'of={device_path}', 
+                                                   'bs=1M', f'seek={seek_mb}', 'count=100', 'conv=fsync']):
+                        self.console.print(f"      ✅ Últimos sectores limpiados")
+                    else:
+                        self.console.print(f"      ⚠️  Error limpiando últimos sectores")
+        except (subprocess.CalledProcessError, ValueError):
+            self.console.print(f"      ⚠️  Error obteniendo tamaño del disco")
+        
+        # 6. Limpiar tabla de particiones con sgdisk si está disponible
+        if self.system.run_command_safe(['sgdisk', '--zap-all', device_path]):
+            self.console.print(f"      ✅ Tabla de particiones GPT limpiada")
+        else:
+            # sgdisk no disponible, usar dd básico para MBR
+            if self.system.run_command_safe(['dd', 'if=/dev/zero', f'of={device_path}', 'bs=512', 'count=1', 'conv=fsync']):
+                self.console.print(f"      ✅ Tabla de particiones MBR limpiada")
+        
+        # 7. Informar al kernel sobre los cambios y esperar
+        self.system.run_command_safe(['partprobe', device_path])
+        self.system.run_command_safe(['udevadm', 'settle'])
+        
+        # 8. Esperar como en el script bash
+        import time
+        time.sleep(3)
+    
+    def _unmount_disk(self, disk_name: str):
+        """Desmonta todas las particiones de un disco"""
+        try:
+            # Obtener particiones montadas
+            result = self.system.run_command(['mount'])
+            mounted_partitions = []
+            
+            for line in result.stdout.split('\n'):
+                if f'/dev/{disk_name}' in line:
+                    parts = line.split()
+                    if len(parts) > 0:
+                        mounted_partitions.append(parts[0])
+            
+            # Desmontar cada partición
+            for partition in mounted_partitions:
+                self.console.print(f"   📤 Desmontando {partition}...")
+                try:
+                    self.system.run_command(['umount', partition])
+                except subprocess.CalledProcessError:
+                    # Forzar desmontaje si es necesario
+                    try:
+                        self.system.run_command(['umount', '-f', partition])
+                    except subprocess.CalledProcessError:
+                        self.console.print(f"   ⚠️  No se pudo desmontar {partition}", style="yellow")
+                        
+        except subprocess.CalledProcessError:
+            pass  # No hay problema si no hay particiones montadas
+    
+    def _destroy_zfs_pools_using_disk(self, disk_name: str):
+        """Destruye pools ZFS que usen el disco especificado"""
+        try:
+            # Verificar si ZFS está disponible
+            self.system.run_command(['which', 'zpool'])
+            
+            # Obtener lista de pools
+            result = self.system.run_command(['zpool', 'list', '-H', '-o', 'name'])
+            pools = [line.strip() for line in result.stdout.strip().split('\n') if line.strip()]
+            
+            pools_to_destroy = []
+            
+            for pool in pools:
+                try:
+                    # Verificar si el disco está en el pool
+                    status_result = self.system.run_command(['zpool', 'status', pool])
+                    
+                    # Buscar el disco en la salida del status
+                    for line in status_result.stdout.split('\n'):
+                        if disk_name in line and ('/dev/' in line or line.strip().startswith(disk_name)):
+                            pools_to_destroy.append(pool)
+                            break
+                            
+                except subprocess.CalledProcessError:
+                    continue
+            
+            # Destruir pools que usen este disco
+            for pool in pools_to_destroy:
+                self.console.print(f"   🗑️  Destruyendo pool ZFS: {pool}")
+                if self.console.confirm(f"¿Confirmar destrucción del pool '{pool}'?", default=False):
+                    try:
+                        # Primero intentar exportar el pool
+                        try:
+                            self.system.run_command(['zpool', 'export', pool])
+                            self.console.print(f"   📤 Pool {pool} exportado", style="blue")
+                        except subprocess.CalledProcessError:
+                            self.console.print(f"   ⚠️  No se pudo exportar {pool}, forzando destrucción", style="yellow")
+                        
+                        # Luego destruir
+                        self.system.run_command(['zpool', 'destroy', '-f', pool])
+                        self.console.print(f"   ✅ Pool {pool} destruido", style="green")
+                        
+                    except subprocess.CalledProcessError as e:
+                        # Intentar forzar la destrucción más agresivamente
+                        self.console.print(f"   ⚠️  Error destruyendo {pool}, intentando limpieza forzada", style="yellow")
+                        try:
+                            # Forzar unmount y destruir
+                            self.system.run_command(['zfs', 'unmount', '-f', pool])
+                            self.system.run_command(['zpool', 'destroy', '-f', pool])
+                            self.console.print(f"   ✅ Pool {pool} destruido (forzado)", style="green")
+                        except subprocess.CalledProcessError:
+                            self.console.print(f"   ❌ No se pudo destruir el pool {pool}. Continúa con limpieza manual.", style="red")
+                            self.console.print(f"   💡 Comando manual: sudo zpool destroy -f {pool}", style="blue")
+                else:
+                    self.console.print("❌ Operación cancelada por el usuario", style="red")
+                    raise Exception("Operación cancelada")
+                    
+        except subprocess.CalledProcessError:
+            # ZFS no disponible, continuar
+            pass
+    
+    def _wipe_disk_metadata(self, disk_name: str):
+        """Limpia todos los metadatos del disco"""
+        self.console.print(f"   🧽 Limpiando metadatos de /dev/{disk_name}...")
+        
+        try:
+            # Primero intentar con dd para limpiar los primeros sectores
+            try:
+                self.system.run_command(['dd', 'if=/dev/zero', f'of=/dev/{disk_name}', 'bs=1M', 'count=100'])
+                self.console.print(f"   ✨ Primeros sectores limpiados con dd", style="blue")
+            except subprocess.CalledProcessError:
+                self.console.print(f"   ⚠️  No se pudieron limpiar sectores con dd", style="yellow")
+            
+            # Usar wipefs para limpiar metadatos
+            try:
+                self.system.run_command(['wipefs', '-af', f'/dev/{disk_name}'])
+                self.console.print(f"   ✨ Metadatos limpiados con wipefs", style="green")
+            except subprocess.CalledProcessError:
+                self.console.print(f"   ⚠️  wipefs falló, intentando limpieza manual", style="yellow")
+                
+                # Intentar limpiar manualmente con dd
+                try:
+                    # Limpiar el principio del disco
+                    self.system.run_command(['dd', 'if=/dev/zero', f'of=/dev/{disk_name}', 'bs=512', 'count=2048'])
+                    
+                    # Obtener tamaño del disco y limpiar el final
+                    result = self.system.run_command(['blockdev', '--getsz', f'/dev/{disk_name}'])
+                    sectors = int(result.stdout.strip())
+                    end_sector = sectors - 2048
+                    
+                    self.system.run_command(['dd', 'if=/dev/zero', f'of=/dev/{disk_name}', 
+                                           f'seek={end_sector}', 'bs=512', 'count=2048'])
+                    
+                    self.console.print(f"   ✨ Limpieza manual completada", style="green")
+                    
+                except subprocess.CalledProcessError as e:
+                    self.console.print(f"   ❌ Error en limpieza manual: {e}", style="red")
+                    # Continuar de todas formas
+            
+            # Limpiar también particiones existentes si existen
+            try:
+                result = self.system.run_command(['lsblk', '-ln', '-o', 'NAME', f'/dev/{disk_name}'])
+                partitions = result.stdout.strip().split('\n')[1:]  # Skip el disco principal
+                
+                for partition in partitions:
+                    if partition.strip():
+                        partition_name = partition.strip()
+                        try:
+                            self.system.run_command(['wipefs', '-af', f'/dev/{partition_name}'])
+                            self.console.print(f"   ✨ Partición {partition_name} limpiada", style="blue")
+                        except subprocess.CalledProcessError:
+                            self.console.print(f"   ⚠️  No se pudo limpiar partición {partition_name}", style="yellow")
+                            
+            except subprocess.CalledProcessError:
+                pass  # No hay particiones para limpiar
+                
+            # Notificar al kernel sobre los cambios
+            try:
+                self.system.run_command(['partprobe', f'/dev/{disk_name}'])
+                self.console.print(f"   🔄 Kernel notificado de cambios", style="blue")
+            except subprocess.CalledProcessError:
+                pass
+                
+            self.console.print(f"   ✅ Disco /dev/{disk_name} preparado", style="green")
+            
+        except Exception as e:
+            self.console.print(f"   ⚠️  Algunos errores durante la limpieza, pero continuando: {e}", style="yellow")
+            # No lanzar excepción, continuar con el proceso
+    
+    def _create_zfs_raid(self, raid_type: RAIDType, disks: List[Disk]):
+        """Crea un RAID ZFS"""
+        self.console.print_panel("Configurando ZFS RAID", title="🔷 ZFS")
+        
+        # Verificar que ZFS esté disponible
+        try:
+            self.system.run_command(['which', 'zpool'])
+        except subprocess.CalledProcessError:
+            self.console.print("❌ ZFS no está disponible en el sistema", style="red")
+            raise Exception("ZFS no disponible")
+        
+        # Cargar módulo ZFS si no está cargado
+        self._ensure_zfs_module_loaded()
+        
+        # Obtener configuración del usuario
+        pool_name = self._get_zfs_pool_name()
+        
+        # Configurar ARC (cache)
+        arc_size = self._configure_zfs_arc()
+        
+        # Detectar ashift óptimo
+        ashift = self._detect_optimal_ashift(disks)
+        
+        # Crear pool ZFS (SIN punto de montaje específico - ZFS lo maneja automáticamente)
+        self._create_zfs_pool(pool_name, raid_type, disks, ashift)
+        
+        # Configurar propiedades del pool
+        self._configure_zfs_properties(pool_name, arc_size)
+        
+        self.console.print(f"✅ Pool ZFS '{pool_name}' creado exitosamente", style="green")
+        
+    def _ensure_zfs_module_loaded(self):
+        """Asegura que el módulo ZFS esté cargado"""
+        try:
+            result = self.system.run_command(['lsmod'])
+            if 'zfs' not in result.stdout:
+                self.console.print("📦 Cargando módulo ZFS...")
+                self.system.run_command(['modprobe', 'zfs'])
+                
+                # Esperar un poco y verificar
+                import time
+                time.sleep(2)
+                
+                result = self.system.run_command(['lsmod'])
+                if 'zfs' not in result.stdout:
+                    raise Exception("No se pudo cargar el módulo ZFS")
+                    
+                self.console.print("✅ Módulo ZFS cargado", style="green")
+                
+        except subprocess.CalledProcessError as e:
+            self.console.print(f"❌ Error cargando módulo ZFS: {e}", style="red")
+            raise
+    
+    def _get_zfs_pool_name(self) -> str:
+        """Obtiene el nombre del pool ZFS del usuario"""
+        while True:
+            pool_name = self.console.prompt("📝 Nombre del pool ZFS", "storage").strip()
+            
+            if not pool_name:
+                self.console.print("❌ El nombre no puede estar vacío", style="red")
+                continue
+                
+            # Verificar que el nombre sea válido
+            if not pool_name.replace('_', '').replace('-', '').isalnum():
+                self.console.print("❌ El nombre solo puede contener letras, números, _ y -", style="red")
+                continue
+                
+            # Verificar que no exista ya
+            try:
+                result = self.system.run_command(['zpool', 'list', pool_name])
+                self.console.print(f"❌ El pool '{pool_name}' ya existe", style="red")
+                continue
+            except subprocess.CalledProcessError:
+                # Pool no existe, perfecto
+                return pool_name
+    
+    def _get_mount_point(self, default_path: str) -> str:
+        """Obtiene el punto de montaje del usuario"""
+        mount_point = self.console.prompt("📁 Punto de montaje", default_path).strip()
+        
+        if not mount_point.startswith('/'):
+            mount_point = f"/{mount_point}"
+            
+        # Crear directorio si no existe
+        if not os.path.exists(mount_point):
+            if self.console.confirm(f"El directorio {mount_point} no existe. ¿Crearlo?", default=True):
+                try:
+                    # Intentar crear sin sudo primero
+                    os.makedirs(mount_point, exist_ok=True)
+                    self.console.print(f"✅ Directorio {mount_point} creado", style="green")
+                except OSError:
+                    # Si falla, usar sudo automáticamente
+                    try:
+                        self.console.print(f"🔐 Creando directorio con permisos elevados...")
+                        # SystemManager ahora maneja sudo automáticamente
+                        self.system.run_command(['mkdir', '-p', mount_point])
+                        self.console.print(f"✅ Directorio {mount_point} creado", style="green")
+                    except subprocess.CalledProcessError as e:
+                        self.console.print(f"❌ Error creando directorio: {e}", style="red")
+                        raise Exception(f"No se pudo crear el directorio {mount_point}")
+            else:
+                raise Exception("Se necesita un punto de montaje válido")
+                
+        return mount_point
+    
+    def _configure_zfs_arc(self) -> int:
+        """Configura el tamaño del ARC de ZFS"""
+        try:
+            # Obtener RAM del sistema
+            with open('/proc/meminfo', 'r') as f:
+                for line in f:
+                    if line.startswith('MemTotal:'):
+                        ram_kb = int(line.split()[1])
+                        ram_gb = ram_kb // (1024 * 1024)
+                        break
+            
+            # Calcular ARC recomendado (25% de RAM)
+            recommended_arc = max(1, ram_gb // 4)
+            
+            self.console.print(f"💾 RAM del sistema: {ram_gb}GB")
+            self.console.print(f"📊 ARC recomendado: {recommended_arc}GB")
+            
+            while True:
+                arc_input = self.console.prompt(f"🎯 Tamaño del ARC en GB", str(recommended_arc)).strip()
+                try:
+                    arc_size = int(arc_input)
+                    if arc_size < 1:
+                        self.console.print("❌ El ARC debe ser al menos 1GB", style="red")
+                        continue
+                    if arc_size > ram_gb:
+                        self.console.print(f"❌ El ARC no puede ser mayor que la RAM ({ram_gb}GB)", style="red")
+                        continue
+                    return arc_size
+                except ValueError:
+                    self.console.print("❌ Ingresa un número válido", style="red")
+                    
+        except Exception as e:
+            self.console.print(f"⚠️  Error detectando RAM, usando 1GB para ARC: {e}", style="yellow")
+            return 1
+    
+    def _detect_optimal_ashift(self, disks: List[Disk]) -> int:
+        """Detecta el ashift óptimo para ZFS"""
+        max_sector_size = 512
+        has_4k_sectors = False
+        
+        for disk in disks:
+            if disk.sector_size > max_sector_size:
+                max_sector_size = disk.sector_size
+            if disk.sector_size == 4096:
+                has_4k_sectors = True
+        
+        # Estrategia de ashift optimizada para compatibilidad
+        if max_sector_size <= 512 and not has_4k_sectors:
+            ashift = 12  # Compatibilidad con cache devices SSD
+            self.console.print("🔧 Usando ashift=12 para compatibilidad con cache devices", style="blue")
+        else:
+            # Calcular ashift basado en el tamaño de sector
+            import math
+            ashift = int(math.log2(max_sector_size)) if max_sector_size >= 512 else 12
+            if ashift < 9:
+                ashift = 12  # Mínimo seguro
+            self.console.print(f"🔧 Ashift detectado: {ashift} (sector size: {max_sector_size})", style="blue")
+        
+        return ashift
+    
+    def _create_zfs_pool(self, pool_name: str, raid_type: RAIDType, disks: List[Disk], ashift: int):
+        """Crea el pool ZFS con configuración automática de montaje"""
+        self.console.print(f"🔨 Creando pool ZFS '{pool_name}'...")
+        
+        # Preguntar sobre mountpoint (opcional)
+        use_custom_mountpoint = self.console.confirm(
+            "¿Configurar punto de montaje personalizado? (No recomendado - ZFS lo maneja automáticamente)", 
+            default=False
+        )
+        
+        # Construir comando base
+        cmd = ['zpool', 'create', '-f', '-o', f'ashift={ashift}']
+        
+        # Configurar mountpoint
+        if use_custom_mountpoint:
+            custom_mount = self.console.prompt("📁 Punto de montaje personalizado", f"/{pool_name}")
+            cmd.extend(['-m', custom_mount])
+            self.console.print(f"📁 Usando punto de montaje personalizado: {custom_mount}")
+        else:
+            # Dejar que ZFS maneje automáticamente (mountpoint por defecto será /{pool_name})
+            self.console.print(f"📁 ZFS configurará automáticamente el montaje en: /{pool_name}")
+        
+        # Añadir nombre del pool
+        cmd.append(pool_name)
+        
+        # Añadir configuración RAID
+        if raid_type == RAIDType.STRIPE:
+            # Stripe: solo añadir los discos directamente
+            pass
+        elif raid_type == RAIDType.MIRROR:
+            cmd.append('mirror')
+        elif raid_type == RAIDType.RAIDZ1:
+            cmd.append('raidz1')
+        elif raid_type == RAIDType.RAIDZ2:
+            cmd.append('raidz2')
+        elif raid_type == RAIDType.RAIDZ3:
+            cmd.append('raidz3')
+        
+        # Añadir discos
+        for disk in disks:
+            cmd.append(f'/dev/{disk.name}')
+        
+        try:
+            self.console.print(f"📝 Ejecutando: {' '.join(cmd)}")
+            self.system.run_command(cmd)
+            self.console.print(f"✅ Pool '{pool_name}' creado exitosamente", style="green")
+            
+            # Mostrar información del pool creado
+            self._show_created_pool_info(pool_name)
+            
+        except subprocess.CalledProcessError as e:
+            self.console.print(f"❌ Error creando pool: {e}", style="red")
+            raise
+    
+    def _show_created_pool_info(self, pool_name: str):
+        """Muestra información del pool recién creado"""
+        try:
+            # Obtener información básica del pool
+            result = self.system.run_command(['zfs', 'get', 'mounted,mountpoint', pool_name])
+            self.console.print(f"\n📋 Información del pool '{pool_name}':")
+            
+            for line in result.stdout.strip().split('\n')[1:]:  # Skip header
+                if line.strip():
+                    parts = line.split()
+                    if len(parts) >= 4:
+                        property_name = parts[1]
+                        value = parts[2]
+                        if property_name == 'mountpoint':
+                            self.console.print(f"   📁 Punto de montaje: {value}")
+                        elif property_name == 'mounted':
+                            mounted_status = "✅ Montado" if value == 'yes' else "❌ No montado"
+                            self.console.print(f"   🔗 Estado: {mounted_status}")
+            
+            # Mostrar comando útil
+            self.console.print(f"\n💡 Comandos útiles:")
+            self.console.print(f"   • Ver estado: zpool status {pool_name}")
+            self.console.print(f"   • Ver propiedades: zfs get all {pool_name}")
+            self.console.print(f"   • Crear dataset: zfs create {pool_name}/mi_dataset")
+            
+        except subprocess.CalledProcessError:
+            self.console.print("   ⚠️  No se pudo obtener información adicional del pool", style="yellow")
+    
+    def _configure_zfs_properties(self, pool_name: str, arc_size: int):
+        """Configura propiedades optimizadas del pool ZFS"""
+        self.console.print("⚙️  Configurando propiedades optimizadas del pool...", style="blue")
+        
+        # Propiedades básicas de rendimiento
+        basic_properties = [
+            ('compression', 'lz4', 'Compresión LZ4 (rápida y eficiente)'),
+            ('atime', 'off', 'Desactivar atime para mejor rendimiento'),
+            ('relatime', 'on', 'Activar relatime (compromiso rendimiento/compatibilidad)'),
+            ('xattr', 'sa', 'Atributos extendidos en system attributes'),
+            ('recordsize', '128K', 'Tamaño de registro optimizado para uso general'),
+            ('logbias', 'latency', 'Optimizar para latencia en lugar de throughput'),
+            ('sync', 'standard', 'Comportamiento de sync estándar'),
+            ('dedup', 'off', 'Desactivar deduplicación (consume mucha RAM)'),
+            ('dnodesize', 'auto', 'Tamaño de dnode automático')
+        ]
+        
+        # Aplicar propiedades básicas
+        for prop, value, description in basic_properties:
+            if self._set_zfs_property(pool_name, prop, value):
+                self.console.print(f"   ✅ {description}")
+            else:
+                self.console.print(f"   ⚠️  {description} - no aplicada", style="yellow")
+        
+        # Configuraciones específicas según el tipo de uso
+        self.console.print("\n🎯 Configuraciones específicas por tipo de uso:")
+        
+        # Preguntar tipo de uso previsto
+        use_case = self._get_zfs_use_case()
+        
+        if use_case == "storage":
+            self._configure_zfs_for_storage(pool_name)
+        elif use_case == "database":
+            self._configure_zfs_for_database(pool_name)
+        elif use_case == "media":
+            self._configure_zfs_for_media(pool_name)
+        elif use_case == "mixed":
+            self._configure_zfs_for_mixed(pool_name)
+        
+        # Configurar ARC del sistema
+        self._configure_zfs_arc_system(arc_size)
+        
+        # Configuraciones adicionales de pool
+        self._configure_zfs_advanced_properties(pool_name)
+        
+        # Crear datasets si el usuario lo desea
+        self._create_zfs_datasets(pool_name)
+        
+        self.console.print("✅ Propiedades ZFS configuradas", style="green")
+    
+    def _set_zfs_property(self, pool_name: str, prop: str, value: str) -> bool:
+        """Establece una propiedad ZFS y maneja errores"""
+        try:
+            self.system.run_command(['zfs', 'set', f'{prop}={value}', pool_name])
+            return True
+        except subprocess.CalledProcessError:
+            return False
+    
+    def _get_zfs_use_case(self) -> str:
+        """Obtiene el caso de uso previsto para el pool ZFS"""
+        self.console.print("\n📊 ¿Cuál será el uso principal de este pool?")
+        self.console.print("   1. Almacenamiento general (documentos, backups)")
+        self.console.print("   2. Base de datos / aplicaciones")
+        self.console.print("   3. Media server (vídeos, música, fotos)")
+        self.console.print("   4. Uso mixto")
+        
+        while True:
+            choice = self.console.prompt("👉 Selecciona el tipo de uso", "1")
+            if choice == "1":
+                return "storage"
+            elif choice == "2":
+                return "database"
+            elif choice == "3":
+                return "media"
+            elif choice == "4":
+                return "mixed"
+            else:
+                self.console.print("❌ Opción inválida", style="red")
+    
+    def _configure_zfs_for_storage(self, pool_name: str):
+        """Configuración optimizada para almacenamiento general"""
+        self.console.print("   📦 Optimizando para almacenamiento general...")
+        
+        storage_properties = [
+            ('recordsize', '1M', 'Registros grandes para archivos grandes'),
+            ('compression', 'zstd', 'Compresión alta para mejor ratio'),
+            ('checksum', 'sha256', 'Checksums robustos'),
+            ('redundant_metadata', 'most', 'Metadatos redundantes')
+        ]
+        
+        for prop, value, description in storage_properties:
+            if self._set_zfs_property(pool_name, prop, value):
+                self.console.print(f"      ✅ {description}")
+    
+    def _configure_zfs_for_database(self, pool_name: str):
+        """Configuración optimizada para bases de datos"""
+        self.console.print("   🗄️  Optimizando para bases de datos...")
+        
+        db_properties = [
+            ('recordsize', '8K', 'Registros pequeños para I/O de BD'),
+            ('logbias', 'throughput', 'Optimizar para throughput'),
+            ('sync', 'always', 'Sync inmediato para consistencia'),
+            ('primarycache', 'metadata', 'Cache solo metadatos'),
+            ('redundant_metadata', 'all', 'Todos los metadatos redundantes')
+        ]
+        
+        for prop, value, description in db_properties:
+            if self._set_zfs_property(pool_name, prop, value):
+                self.console.print(f"      ✅ {description}")
+    
+    def _configure_zfs_for_media(self, pool_name: str):
+        """Configuración optimizada para media server"""
+        self.console.print("   🎬 Optimizando para media server...")
+        
+        media_properties = [
+            ('recordsize', '1M', 'Registros grandes para streaming'),
+            ('compression', 'lz4', 'Compresión rápida'),
+            ('atime', 'off', 'Sin atime para mejor rendimiento'),
+            ('logbias', 'latency', 'Baja latencia para streaming'),
+            ('primarycache', 'all', 'Cache completo para acceso frecuente')
+        ]
+        
+        for prop, value, description in media_properties:
+            if self._set_zfs_property(pool_name, prop, value):
+                self.console.print(f"      ✅ {description}")
+    
+    def _configure_zfs_for_mixed(self, pool_name: str):
+        """Configuración balanceada para uso mixto"""
+        self.console.print("   ⚖️  Configuración balanceada para uso mixto...")
+        
+        mixed_properties = [
+            ('recordsize', '128K', 'Registro balanceado'),
+            ('compression', 'lz4', 'Compresión eficiente'),
+            ('logbias', 'latency', 'Balance latencia/throughput'),
+            ('primarycache', 'all', 'Cache completo'),
+            ('redundant_metadata', 'most', 'Metadatos importantes redundantes')
+        ]
+        
+        for prop, value, description in mixed_properties:
+            if self._set_zfs_property(pool_name, prop, value):
+                self.console.print(f"      ✅ {description}")
+    
+    def _configure_zfs_arc_system(self, arc_size: int):
+        """Configura el ARC del sistema ZFS"""
+        self.console.print("\n💾 Configurando ZFS ARC del sistema...")
+        
+        try:
+            # Crear directorio de configuración si no existe
+            config_dir = "/etc/modprobe.d"
+            if not os.path.exists(config_dir):
+                if self.system.run_command_safe(['mkdir', '-p', config_dir]):
+                    self.console.print(f"   ✅ Directorio {config_dir} creado")
+            
+            # Configurar ARC
+            arc_bytes = arc_size * 1024 * 1024 * 1024
+            arc_min = arc_bytes // 4  # Mínimo 25% del máximo
+            
+            zfs_conf_content = f"""# ZFS ARC Configuration - Configurado por raid_manager.py
+# Tamaño máximo del ARC: {arc_size}GB
+options zfs zfs_arc_max={arc_bytes}
+# Tamaño mínimo del ARC: {arc_size//4}GB  
+options zfs zfs_arc_min={arc_min}
+# Configuración de L2ARC
+options zfs l2arc_write_max=134217728
+options zfs l2arc_headroom=4
+"""
+            
+            # Escribir configuración usando sudo
+            config_file = '/etc/modprobe.d/zfs.conf'
+            temp_file = '/tmp/zfs_config.tmp'
+            
+            # Escribir a archivo temporal primero
+            try:
+                with open(temp_file, 'w') as f:
+                    f.write(zfs_conf_content)
+                
+                # Mover archivo con sudo
+                if self.system.run_command_safe(['sudo', 'cp', temp_file, config_file]):
+                    self.console.print(f"   ✅ ARC máximo: {arc_size}GB")
+                    self.console.print(f"   ✅ ARC mínimo: {arc_size//4}GB")
+                    self.console.print("   ✅ Configuración L2ARC optimizada")
+                    
+                    # Limpiar archivo temporal
+                    try:
+                        os.remove(temp_file)
+                    except:
+                        pass
+                        
+                    # Aplicar configuración actual (si es posible)
+                    try:
+                        current_max = f"/sys/module/zfs/parameters/zfs_arc_max"
+                        if os.path.exists(current_max):
+                            # Usar echo con sudo para escribir al sistema
+                            if self.system.run_command_safe(['sudo', 'bash', '-c', f'echo {arc_bytes} > {current_max}']):
+                                self.console.print("   ✅ ARC aplicado inmediatamente")
+                            else:
+                                self.console.print("   💡 ARC se aplicará en el próximo reinicio")
+                        else:
+                            self.console.print("   💡 ARC se aplicará cuando se cargue el módulo ZFS")
+                    except Exception:
+                        self.console.print("   💡 ARC se aplicará en el próximo reinicio")
+                else:
+                    self.console.print("   ⚠️  No se pudo escribir configuración ARC", style="yellow")
+                    self.console.print("   💡 Puedes configurar manualmente editando /etc/modprobe.d/zfs.conf", style="blue")
+                    
+            except Exception as e:
+                self.console.print(f"   ⚠️  Error escribiendo configuración temporal: {e}", style="yellow")
+                
+        except Exception as e:
+            self.console.print(f"   ⚠️  Error configurando ARC: {e}", style="yellow")
+            self.console.print("   💡 Puedes configurar manualmente editando /etc/modprobe.d/zfs.conf", style="blue")
+    
+    def _configure_zfs_advanced_properties(self, pool_name: str):
+        """Configuraciones avanzadas adicionales de ZFS"""
+        self.console.print("\n🔧 Configuraciones avanzadas del pool...")
+        
+        # Solo configuraciones que aplican al pool entero
+        self.console.print("   💡 Las cuotas y snapshots se configurarán por dataset individual")
+        
+        # Configuración de cache devices (futuro)
+        self.console.print("   💡 Después puedes agregar cache devices con: zpool add <pool> cache <device>")
+    
+    def _create_zfs_datasets(self, pool_name: str):
+        """Crea datasets ZFS según las necesidades del usuario"""
+        self.console.print("\n📁 Configuración de Datasets ZFS")
+        
+        if not self.console.confirm("¿Crear datasets organizados?", default=True):
+            return
+        
+        while True:
+            self.console.print("\n🎯 Opciones de creación de datasets:")
+            self.console.print("   1. Configuración rápida recomendada")
+            self.console.print("   2. Crear datasets personalizados")
+            self.console.print("   3. No crear datasets ahora")
+            
+            choice = self.console.prompt("👉 Selecciona opción", "1")
+            
+            if choice == "1":
+                # Mostrar explicación y pedir confirmación
+                if self._explain_recommended_setup(pool_name):
+                    self._create_recommended_datasets(pool_name)
+                    break  # Salir del bucle después de crear
+                # Si no confirma, volver al menú de opciones
+                
+            elif choice == "2":
+                self._create_custom_datasets(pool_name)
+                break  # Salir del bucle después de crear
+                
+            elif choice == "3":
+                self.console.print("   ⏭️  Omitiendo creación de datasets")
+                break  # Salir sin crear nada
+                
+            else:
+                self.console.print("❌ Opción inválida", style="red")
+    
+    def _explain_recommended_setup(self, pool_name: str):
+        """Explica la configuración rápida recomendada al usuario"""
+        self.console.print("\n📋 Configuración Rápida Recomendada:")
+        self.console.print(f"   Se crearán 5 datasets organizados en el pool '{pool_name}':")
+        
+        self.console.print("\n   📁 Datasets que se crearán:")
+        self.console.print("   ┌─ 📦 data/       → Datos generales del usuario")
+        self.console.print("   ├─ 🎬 media/      → Videos, música, fotos (optimizado para streaming)")
+        self.console.print("   ├─ 💾 backups/    → Respaldos (máxima compresión)")
+        self.console.print("   ├─ 🌐 shares/     → Carpetas compartidas en red")
+        self.console.print("   └─ ⚙️  apps/       → Datos de aplicaciones y servicios")
+        
+        self.console.print("\n   🔧 Configuraciones específicas por dataset:")
+        self.console.print("   • data/    → Compresión LZ4, recordsize 128K (uso general)")
+        self.console.print("   • media/   → Compresión LZ4, recordsize 1M (archivos grandes)")
+        self.console.print("   • backups/ → Compresión ZSTD, recordsize 1M (máximo ratio)")
+        self.console.print("   • shares/  → Compresión LZ4, recordsize 128K (red)")
+        self.console.print("   • apps/    → Compresión LZ4, recordsize 64K (aplicaciones)")
+        
+        self.console.print("\n   📍 Puntos de montaje:")
+        self.console.print(f"   • /{pool_name}/data    → Datos del usuario")
+        self.console.print(f"   • /{pool_name}/media   → Biblioteca multimedia")
+        self.console.print(f"   • /{pool_name}/backups → Respaldos importantes")
+        self.console.print(f"   • /{pool_name}/shares  → Recursos compartidos")
+        self.console.print(f"   • /{pool_name}/apps    → Datos de aplicaciones")
+        
+        self.console.print("\n   ✅ Beneficios de esta estructura:")
+        self.console.print("   • Organización clara y escalable")
+        self.console.print("   • Configuraciones optimizadas por tipo de contenido")
+        self.console.print("   • Gestión independiente por dataset")
+        self.console.print("   • Fácil gestión de permisos y políticas")
+        
+        if not self.console.confirm("\n¿Proceder con esta configuración básica?", default=True):
+            self.console.print("   ❌ Configuración cancelada")
+            return False
+        
+        return True
+    
+    def _create_recommended_datasets(self, pool_name: str):
+        """Crea una estructura de datasets recomendada"""
+        self.console.print("\n🏗️  Creando estructura de datasets recomendada...")
+        
+        # Preguntar sobre configuraciones adicionales una sola vez
+        self.console.print("\n⚙️  Configuraciones adicionales para todos los datasets:")
+        enable_snapshots = self.console.confirm("¿Habilitar snapshots automáticos para los datasets?", default=False)
+        enable_quotas = self.console.confirm("¿Configurar cuotas de espacio para los datasets?", default=False)
+        
+        # Datasets recomendados con configuraciones específicas
+        recommended_datasets = [
+            {
+                'name': 'data',
+                'description': 'Datos generales del usuario',
+                'properties': {
+                    'compression': 'lz4',
+                    'atime': 'off',
+                    'recordsize': '128K'
+                },
+                'suggested_quota': '500G'
+            },
+            {
+                'name': 'media',
+                'description': 'Archivos multimedia (videos, música, fotos)',
+                'properties': {
+                    'compression': 'lz4',
+                    'atime': 'off',
+                    'recordsize': '1M'
+                },
+                'suggested_quota': '2T'
+            },
+            {
+                'name': 'backups',
+                'description': 'Respaldos y archivos importantes',
+                'properties': {
+                    'compression': 'zstd',
+                    'atime': 'off',
+                    'recordsize': '1M'
+                },
+                'suggested_quota': '1T'
+            },
+            {
+                'name': 'shares',
+                'description': 'Carpetas compartidas en red',
+                'properties': {
+                    'compression': 'lz4',
+                    'atime': 'off',
+                    'recordsize': '128K'
+                },
+                'suggested_quota': '200G'
+            },
+            {
+                'name': 'apps',
+                'description': 'Datos de aplicaciones y servicios',
+                'properties': {
+                    'compression': 'lz4',
+                    'atime': 'off',
+                    'recordsize': '64K'
+                },
+                'suggested_quota': '100G'
+            }
+        ]
+        
+        created_datasets = []
+        
+        for dataset_config in recommended_datasets:
+            dataset_full_name = f"{pool_name}/{dataset_config['name']}"
+            
+            try:
+                # Crear dataset
+                self.console.print(f"   📁 Creando dataset: {dataset_full_name}")
+                self.system.run_command(['zfs', 'create', dataset_full_name])
+                
+                # Aplicar propiedades específicas
+                for prop, value in dataset_config['properties'].items():
+                    try:
+                        self.system.run_command(['zfs', 'set', f'{prop}={value}', dataset_full_name])
+                    except subprocess.CalledProcessError:
+                        self.console.print(f"      ⚠️  No se pudo configurar {prop}={value}", style="yellow")
+                
+                # Configurar automontaje para este dataset (ZFS maneja automáticamente)
+                try:
+                    self.system.run_command(['zfs', 'set', 'canmount=on', dataset_full_name])
+                    # ZFS automáticamente usa /{pool_name}/{dataset_name} como mountpoint por defecto
+                except subprocess.CalledProcessError:
+                    self.console.print(f"      ⚠️  No se pudo configurar automontaje", style="yellow")
+                
+                # Configurar snapshots solo si el usuario lo pidió
+                if enable_snapshots:
+                    self._configure_dataset_snapshots(dataset_full_name)
+                
+                # Configurar cuota solo si el usuario lo pidió
+                if enable_quotas:
+                    self._configure_dataset_quota(dataset_full_name, dataset_config['suggested_quota'])
+                
+                created_datasets.append({
+                    'name': dataset_full_name,
+                    'description': dataset_config['description'],
+                    'mountpoint': f"/{dataset_full_name}"
+                })
+                
+                self.console.print(f"      ✅ Dataset creado: {dataset_config['description']}", style="green")
+                
+            except subprocess.CalledProcessError as e:
+                self.console.print(f"      ❌ Error creando dataset {dataset_config['name']}: {e}", style="red")
+        
+        # Mostrar resumen de datasets creados
+        if created_datasets:
+            self._show_datasets_summary(created_datasets)
+    
+    def _create_custom_datasets(self, pool_name: str):
+        """Permite al usuario crear datasets personalizados"""
+        self.console.print("\n🛠️  Creación de datasets personalizados")
+        
+        datasets_created = []
+        
+        while True:
+            self.console.print(f"\n📁 Crear nuevo dataset en pool '{pool_name}'")
+            
+            # Nombre del dataset
+            dataset_name = self.console.prompt("📝 Nombre del dataset", "").strip()
+            if not dataset_name:
+                break
+            
+            # Validar nombre
+            if not self._validate_dataset_name(dataset_name):
+                self.console.print("❌ Nombre inválido. Use solo letras, números, - y _", style="red")
+                continue
+            
+            dataset_full_name = f"{pool_name}/{dataset_name}"
+            
+            # Verificar si ya existe
+            try:
+                result = self.system.run_command(['zfs', 'list', dataset_full_name], check=False)
+                if result.returncode == 0:
+                    self.console.print(f"❌ El dataset '{dataset_full_name}' ya existe", style="red")
+                    continue
+            except:
+                pass
+            
+            # Descripción opcional
+            description = self.console.prompt("📋 Descripción (opcional)", "").strip()
+            
+            # Configuraciones específicas
+            self.console.print("\n⚙️  Configuraciones del dataset:")
+            
+            # Compresión
+            compression_options = {
+                '1': 'off',
+                '2': 'lz4',
+                '3': 'zstd',
+                '4': 'gzip'
+            }
+            
+            self.console.print("   Compresión:")
+            self.console.print("   1. Sin compresión")
+            self.console.print("   2. LZ4 (rápida)")
+            self.console.print("   3. ZSTD (alta ratio)")
+            self.console.print("   4. GZIP (máxima ratio)")
+            
+            comp_choice = self.console.prompt("   👉 Compresión", "2")
+            compression = compression_options.get(comp_choice, 'lz4')
+            
+            # Recordsize
+            recordsize_options = {
+                '1': '16K',
+                '2': '64K', 
+                '3': '128K',
+                '4': '1M'
+            }
+            
+            self.console.print("\n   Tamaño de registro:")
+            self.console.print("   1. 16K (bases de datos)")
+            self.console.print("   2. 64K (aplicaciones)")
+            self.console.print("   3. 128K (uso general)")
+            self.console.print("   4. 1M (archivos grandes)")
+            
+            rec_choice = self.console.prompt("   👉 Recordsize", "3")
+            recordsize = recordsize_options.get(rec_choice, '128K')
+            
+            # Atime
+            disable_atime = self.console.confirm("   ¿Desactivar atime? (recomendado para rendimiento)", default=True)
+            atime = 'off' if disable_atime else 'on'
+            
+            # Automontaje
+            enable_automount = self.console.confirm("   ¿Habilitar automontaje?", default=True)
+            
+            # Snapshots
+            enable_snapshots = self.console.confirm("   ¿Habilitar snapshots automáticos?", default=True)
+            
+            # Cuota
+            configure_quota = self.console.confirm("   ¿Configurar cuota de espacio?", default=False)
+            quota_size = None
+            if configure_quota:
+                quota_size = self.console.prompt("   💾 Cuota (ej: 100G, 1T)", "").strip()
+            
+            # Crear dataset
+            try:
+                self.console.print(f"\n🔨 Creando dataset '{dataset_full_name}'...")
+                
+                # Crear con propiedades
+                cmd = ['zfs', 'create']
+                cmd.extend(['-o', f'compression={compression}'])
+                cmd.extend(['-o', f'recordsize={recordsize}'])
+                cmd.extend(['-o', f'atime={atime}'])
+                if enable_automount:
+                    cmd.extend(['-o', 'canmount=on'])
+                    # ZFS automáticamente usa /{pool_name}/{dataset_name} como mountpoint por defecto
+                else:
+                    cmd.extend(['-o', 'canmount=off'])
+                cmd.append(dataset_full_name)
+                
+                self.system.run_command(cmd)
+                
+                # Configurar snapshots si está habilitado
+                if enable_snapshots:
+                    self._configure_dataset_snapshots(dataset_full_name)
+                
+                # Configurar cuota si se especificó
+                if quota_size:
+                    self._configure_dataset_quota(dataset_full_name, quota_size)
+                
+                datasets_created.append({
+                    'name': dataset_full_name,
+                    'description': description or "Dataset personalizado",
+                    'mountpoint': f"/{dataset_full_name}",
+                    'compression': compression,
+                    'recordsize': recordsize,
+                    'atime': atime
+                })
+                
+                self.console.print(f"✅ Dataset '{dataset_name}' creado exitosamente", style="green")
+                
+                # Preguntar si crear otro
+                if not self.console.confirm("¿Crear otro dataset?", default=False):
+                    break
+                    
+            except subprocess.CalledProcessError as e:
+                self.console.print(f"❌ Error creando dataset: {e}", style="red")
+        
+        # Mostrar resumen
+        if datasets_created:
+            self._show_datasets_summary(datasets_created)
+    
+    def _validate_dataset_name(self, name: str) -> bool:
+        """Valida que el nombre del dataset sea válido"""
+        if not name:
+            return False
+        
+        # Solo letras, números, guiones y guiones bajos
+        import re
+        return bool(re.match(r'^[a-zA-Z0-9_-]+$', name))
+    
+    def _show_datasets_summary(self, datasets: list):
+        """Muestra un resumen de los datasets creados"""
+        self.console.print("\n📊 Resumen de Datasets Creados:")
+        
+        if RICH_AVAILABLE:
+            from rich.table import Table
+            table = Table(title="📁 Datasets ZFS Creados")
+            table.add_column("Dataset", style="cyan")
+            table.add_column("Punto de Montaje", style="green")
+            table.add_column("Descripción", style="yellow")
+            
+            for dataset in datasets:
+                table.add_row(
+                    dataset['name'],
+                    dataset['mountpoint'],
+                    dataset['description']
+                )
+            
+            self.console.console.print(table)
+        else:
+            for dataset in datasets:
+                print(f"   📁 {dataset['name']}")
+                print(f"      📍 Montaje: {dataset['mountpoint']}")
+                print(f"      📝 Descripción: {dataset['description']}")
+                print()
+        
+        self.console.print("\n💡 Comandos útiles para datasets:")
+        self.console.print("   • Listar datasets: zfs list")
+        self.console.print("   • Ver propiedades: zfs get all <dataset>")
+        self.console.print("   • Crear snapshot: zfs snapshot <dataset>@<nombre>")
+        self.console.print("   • Configurar cuota: zfs set quota=<tamaño> <dataset>")
+    
+    def _configure_dataset_snapshots(self, dataset_name: str):
+        """Configura snapshots automáticos para un dataset específico"""
+        self.console.print(f"      📸 Configurando snapshots para {dataset_name}")
+        
+        snapshot_properties = [
+            ('com.sun:auto-snapshot', 'true', 'Snapshots automáticos'),
+            ('com.sun:auto-snapshot:hourly', 'true', 'Snapshots cada hora'),
+            ('com.sun:auto-snapshot:daily', 'true', 'Snapshots diarios'),
+            ('com.sun:auto-snapshot:weekly', 'true', 'Snapshots semanales'),
+            ('com.sun:auto-snapshot:monthly', 'true', 'Snapshots mensuales')
+        ]
+        
+        for prop, value, description in snapshot_properties:
+            try:
+                self.system.run_command(['zfs', 'set', f'{prop}={value}', dataset_name])
+            except subprocess.CalledProcessError:
+                self.console.print(f"         ⚠️  No se pudo configurar {description}", style="yellow")
+        
+        self.console.print(f"         ✅ Snapshots automáticos habilitados")
+    
+    def _configure_dataset_quota(self, dataset_name: str, suggested_quota: str):
+        """Configura cuota para un dataset específico"""
+        try:
+            self.system.run_command(['zfs', 'set', f'quota={suggested_quota}', dataset_name])
+            self.console.print(f"      💾 Cuota de {suggested_quota} configurada")
+        except subprocess.CalledProcessError:
+            self.console.print(f"      ⚠️  No se pudo configurar cuota de {suggested_quota}", style="yellow")
+    
+    def _create_btrfs_raid(self, raid_type: RAIDType, disks: List[Disk]):
+        """Crea un RAID BTRFS"""
+        self.console.print_panel("Configurando BTRFS RAID", title="🌿 BTRFS")
+        
+        # Verificar que BTRFS esté disponible
+        try:
+            self.system.run_command(['which', 'mkfs.btrfs'])
+        except subprocess.CalledProcessError:
+            self.console.print("❌ BTRFS no está disponible en el sistema", style="red")
+            raise Exception("BTRFS no disponible")
+        
+        # Obtener punto de montaje
+        mount_point = self._get_mount_point("/mnt/btrfs_raid")
+        
+        # Mapear tipos de RAID
+        raid_mapping = {
+            RAIDType.BTRFS_RAID0: 'raid0',
+            RAIDType.BTRFS_RAID1: 'raid1', 
+            RAIDType.BTRFS_RAID10: 'raid10',
+            RAIDType.BTRFS_RAID5: 'raid5',
+            RAIDType.BTRFS_RAID6: 'raid6'
+        }
+        
+        btrfs_raid_type = raid_mapping.get(raid_type)
+        if not btrfs_raid_type:
+            raise Exception(f"Tipo de RAID no soportado: {raid_type}")
+        
+        # Mostrar advertencia para RAID experimentales
+        if raid_type in [RAIDType.BTRFS_RAID5, RAIDType.BTRFS_RAID6]:
+            self.console.print("⚠️  ADVERTENCIA: RAID 5/6 en BTRFS es experimental", style="yellow")
+            if not self.console.confirm("¿Continuar con RAID experimental?", default=False):
+                raise Exception("Operación cancelada por el usuario")
+        
+        # Crear filesystem BTRFS
+        self._create_btrfs_filesystem(btrfs_raid_type, disks, mount_point)
+        
+        # Configurar propiedades BTRFS
+        self._configure_btrfs_properties(mount_point)
+        
+        self.console.print("✅ BTRFS RAID creado exitosamente", style="green")
+    
+    def _create_btrfs_filesystem(self, raid_type: str, disks: List[Disk], mount_point: str):
+        """Crea el filesystem BTRFS"""
+        self.console.print(f"🔨 Creando filesystem BTRFS {raid_type.upper()}...")
+        
+        # Construir comando
+        cmd = ['mkfs.btrfs', '-f', '-d', raid_type, '-m', raid_type]
+        
+        # Añadir discos
+        for disk in disks:
+            cmd.append(f'/dev/{disk.name}')
+        
+        try:
+            self.console.print(f"📝 Ejecutando: {' '.join(cmd)}")
+            self.system.run_command(cmd)
+            self.console.print("✅ Filesystem BTRFS creado", style="green")
+            
+            # Montar el filesystem
+            self.console.print(f"📁 Montando en {mount_point}...")
+            self.system.run_command(['mount', f'/dev/{disks[0].name}', mount_point])
+            self.console.print(f"✅ Montado en {mount_point}", style="green")
+            
+        except subprocess.CalledProcessError as e:
+            self.console.print(f"❌ Error creando filesystem BTRFS: {e}", style="red")
+            raise
+    
+    def _configure_btrfs_properties(self, mount_point: str):
+        """Configura propiedades del filesystem BTRFS"""
+        self.console.print("⚙️  Configurando propiedades BTRFS...")
+        
+        # Habilitar compresión
+        try:
+            self.system.run_command(['btrfs', 'property', 'set', mount_point, 'compression', 'lzo'])
+            self.console.print("   ✅ Compresión LZO habilitada", style="green")
+        except subprocess.CalledProcessError as e:
+            self.console.print(f"   ⚠️  No se pudo habilitar compresión: {e}", style="yellow")
+        
+        # Mostrar información del filesystem
+        try:
+            result = self.system.run_command(['btrfs', 'filesystem', 'show', mount_point])
+            self.console.print("📊 Información del filesystem:")
+            for line in result.stdout.split('\n'):
+                if line.strip():
+                    self.console.print(f"   {line}")
+        except subprocess.CalledProcessError:
+            pass
+    
+    def _configure_auto_mount(self, fs_type: FilesystemType, raid_type: RAIDType, disks: List[Disk]):
+        """Configura el montaje automático según el tipo de filesystem"""
+        self.console.print_panel("Configurando montaje automático", title="🔧 Configuración")
+        
+        if not self.console.confirm("¿Configurar montaje automático en el arranque?", default=True):
+            self.console.print("⏭️  Saltando configuración de montaje automático", style="blue")
+            return
+        
+        try:
+            if fs_type == FilesystemType.ZFS:
+                self._configure_zfs_auto_mount()
+            else:
+                # BTRFS requiere entrada en fstab
+                self._configure_btrfs_fstab(disks)
+                
+        except Exception as e:
+            self.console.print(f"❌ Error configurando montaje automático: {e}", style="red")
+    
+    def _configure_zfs_auto_mount(self):
+        """Configura montaje automático para ZFS (sin fstab)"""
+        self.console.print("🔷 Configurando ZFS para montaje automático...", style="blue")
+        
+        # ZFS no necesita /etc/fstab - maneja su propio sistema de montaje
+        self.console.print("💡 ZFS gestiona automáticamente el montaje de pools y datasets")
+        self.console.print("   • Los pools se importan automáticamente al arranque")
+        self.console.print("   • Los datasets se montan según su propiedad 'mountpoint'")
+        
+        # Habilitar servicios ZFS del sistema
+        zfs_services = [
+            ('zfs-import-cache.service', 'Importación automática de pools'),
+            ('zfs-mount.service', 'Montaje automático de datasets'),
+            ('zfs.target', 'Target principal de ZFS')
+        ]
+        
+        for service, description in zfs_services:
+            if self.system.run_command_safe(['systemctl', 'enable', service]):
+                self.console.print(f"   ✅ {service} habilitado - {description}")
+            else:
+                self.console.print(f"   ⚠️  Error con {service} - {description}", style="yellow")
+        
+        # Verificar que los servicios estén activos
+        self.console.print("\n🔍 Verificando estado de servicios ZFS...")
+        for service, description in zfs_services:
+            try:
+                result = self.system.run_command(['systemctl', 'is-enabled', service], check=False)
+                if result.returncode == 0:
+                    status = result.stdout.strip()
+                    if status == 'enabled':
+                        self.console.print(f"   ✅ {service}: {status}")
+                    else:
+                        self.console.print(f"   ⚠️  {service}: {status}", style="yellow")
+                else:
+                    self.console.print(f"   ❌ {service}: no disponible", style="red")
+            except subprocess.CalledProcessError:
+                self.console.print(f"   ❌ {service}: error verificando", style="red")
+        
+        # Información adicional sobre montaje ZFS
+        self.console.print("\n📚 Información sobre montaje ZFS:")
+        self.console.print("   • Para cambiar punto de montaje: zfs set mountpoint=/ruta pool/dataset")
+        self.console.print("   • Para deshabilitar montaje: zfs set mountpoint=none pool/dataset") 
+        self.console.print("   • Para montar manualmente: zfs mount pool/dataset")
+        self.console.print("   • Para ver puntos de montaje: zfs get mountpoint")
+        
+        self.console.print("✅ Configuración ZFS completada", style="green")
+    
+    def _configure_btrfs_fstab(self, disks: List[Disk]):
+        """Configura fstab para BTRFS"""
+        self.console.print("🌿 Configurando BTRFS para montaje automático...", style="green")
+        
+        try:
+            # Para BTRFS RAID, necesitamos el UUID del filesystem, no del dispositivo individual
+            device_path = f"/dev/{disks[0].name}"
+            
+            # Intentar obtener UUID del filesystem BTRFS
+            result = self.system.run_command(['blkid', '-s', 'UUID', '-o', 'value', device_path], check=False)
+            uuid = result.stdout.strip() if result.returncode == 0 else None
+            
+            if not uuid:
+                # Si no hay UUID, el filesystem podría no estar montado aún
+                self.console.print("⚠️  No se encontró UUID, intentando detectar filesystem BTRFS...", style="yellow")
+                try:
+                    # Usar btrfs filesystem show para obtener UUID
+                    result = self.system.run_command(['btrfs', 'filesystem', 'show', device_path])
+                    for line in result.stdout.split('\n'):
+                        if 'uuid:' in line:
+                            uuid = line.split('uuid:')[1].strip()
+                            break
+                except subprocess.CalledProcessError:
+                    pass
+            
+            if not uuid:
+                raise Exception("No se pudo obtener UUID del filesystem BTRFS")
+            
+            # Obtener o definir punto de montaje
+            mount_point = "/storage"  # Punto de montaje por defecto
+            
+            try:
+                result = self.system.run_command(['findmnt', '-n', '-o', 'TARGET', device_path], check=False)
+                if result.returncode == 0 and result.stdout.strip():
+                    mount_point = result.stdout.strip()
+                    self.console.print(f"📁 Punto de montaje detectado: {mount_point}")
+                else:
+                    self.console.print(f"📁 Usando punto de montaje por defecto: {mount_point}")
+                    # Crear directorio si no existe
+                    if self.system.run_command_safe(['mkdir', '-p', mount_point]):
+                        self.console.print(f"   ✅ Directorio {mount_point} creado")
+            except subprocess.CalledProcessError:
+                self.console.print(f"📁 Usando punto de montaje por defecto: {mount_point}")
+                self.system.run_command_safe(['mkdir', '-p', mount_point])
+            
+            # Crear entrada fstab optimizada para BTRFS
+            fstab_options = []
+            fstab_options.append("defaults")
+            fstab_options.append("compress=zstd")  # Compresión moderna y eficiente
+            fstab_options.append("noatime")        # Mejor rendimiento
+            fstab_options.append("space_cache=v2") # Cache de espacio v2
+            
+            fstab_entry = f"UUID={uuid} {mount_point} btrfs {','.join(fstab_options)} 0 2\n"
+            
+            # Crear backup de fstab
+            if self.system.run_command_safe(['cp', '/etc/fstab', '/etc/fstab.backup']):
+                self.console.print("   ✅ Backup de /etc/fstab creado")
+            
+            # Verificar si ya existe una entrada para este UUID
+            try:
+                with open('/etc/fstab', 'r') as f:
+                    fstab_content = f.read()
+                
+                if uuid in fstab_content:
+                    self.console.print("⚠️  Ya existe una entrada para este UUID en fstab", style="yellow")
+                    if not self.console.confirm("¿Sobrescribir entrada existente?", default=False):
+                        self.console.print("⏭️  Manteniendo configuración existente", style="blue")
+                        return
+                    
+                    # Remover entrada existente
+                    lines = fstab_content.split('\n')
+                    new_lines = [line for line in lines if uuid not in line]
+                    fstab_content = '\n'.join(new_lines)
+                    
+                    with open('/etc/fstab', 'w') as f:
+                        f.write(fstab_content)
+                    
+                    self.console.print("   🔄 Entrada anterior removida")
+                
+                # Añadir nueva entrada a fstab
+                with open('/etc/fstab', 'a') as f:
+                    f.write(f"\n# BTRFS RAID configurado por raid_manager.py - {time.strftime('%Y-%m-%d %H:%M:%S')}\n")
+                    f.write(fstab_entry)
+                
+                self.console.print("✅ Entrada añadida a /etc/fstab", style="green")
+                self.console.print(f"   📄 UUID: {uuid}")
+                self.console.print(f"   📁 Punto de montaje: {mount_point}")
+                self.console.print(f"   ⚙️  Opciones: {','.join(fstab_options)}")
+                
+                # Verificar que el montaje funciona
+                if self.console.confirm("¿Probar montaje automático?", default=True):
+                    if self.system.run_command_safe(['mount', '-a']):
+                        self.console.print("✅ Montaje automático verificado", style="green")
+                    else:
+                        self.console.print("⚠️  Error en montaje automático - revisar configuración", style="yellow")
+                
+            except Exception as e:
+                raise Exception(f"Error escribiendo fstab: {e}")
+            
+        except Exception as e:
+            self.console.print(f"❌ Error configurando fstab: {e}", style="red")
+            self.console.print("💡 Puedes configurar el montaje manualmente después", style="blue")
+    
+    def _show_final_summary(self, fs_type: FilesystemType, raid_type: RAIDType, disks: List[Disk]):
+        """Muestra el resumen final de la configuración"""
+        self.console.print_panel("¡RAID configurado exitosamente!", title="🎉 ¡Completado!")
+        
+        if RICH_AVAILABLE:
+            # Crear tabla de resumen final
+            summary_table = Table(title="📋 Configuración Final", show_header=False)
+            summary_table.add_column("Aspecto", style="bold cyan", width=20)
+            summary_table.add_column("Detalle", style="white")
+            
+            summary_table.add_row("Filesystem", fs_type.value.upper())
+            summary_table.add_row("Tipo RAID", raid_type.value)
+            summary_table.add_row("Discos utilizados", f"{len(disks)} discos")
+            
+            disk_list = ", ".join([f"{disk.name} ({disk.size_human})" for disk in disks])
+            summary_table.add_row("Detalle de discos", disk_list)
+            
+            # Estado del sistema
+            if fs_type == FilesystemType.ZFS:
+                try:
+                    result = self.system.run_command(['zpool', 'list'])
+                    summary_table.add_row("Estado ZFS", "✅ Online")
+                except:
+                    summary_table.add_row("Estado ZFS", "⚠️  Verificar manualmente")
+            else:
+                summary_table.add_row("Estado BTRFS", "✅ Montado")
+            
+            self.console.console.print(summary_table)
+        
+        # Comandos útiles
+        self.console.print("\n💡 Comandos útiles:", style="bold blue")
+        
+        if fs_type == FilesystemType.ZFS:
+            useful_commands = [
+                "zpool status - Ver estado del pool",
+                "zfs list - Listar datasets",
+                "zpool iostat 1 - Monitor de I/O en tiempo real",
+                "zfs get all <pool> - Ver todas las propiedades"
+            ]
+        else:
+            useful_commands = [
+                "btrfs filesystem show - Ver filesystems BTRFS",
+                "btrfs filesystem usage <mount> - Ver uso del espacio",
+                "btrfs device stats <mount> - Estadísticas de dispositivos",
+                "btrfs scrub start <mount> - Iniciar verificación de integridad"
+            ]
+        
+        for cmd in useful_commands:
+            self.console.print(f"   • {cmd}", style="blue")
+        
+        # Advertencias finales
+        warnings = [
+            "🔄 Reinicia el sistema para asegurar el montaje automático",
+            "📊 Monitorea el rendimiento inicial del RAID",
+            "💾 Configura backups regulares de tus datos importantes"
+        ]
+        
+        self.console.print("\n⚠️  Recomendaciones importantes:", style="bold yellow")
+        for warning in warnings:
+            self.console.print(f"   {warning}", style="yellow")
     
     def manage_existing(self):
         """Gestiona pools/filesystems existentes"""
