@@ -1,0 +1,4 @@
+# RAID Manager - Dependencias Python
+rich>=12.0.0
+click>=8.0.0
+pyyaml>=6.0
