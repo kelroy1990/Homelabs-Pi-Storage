@@ -18,6 +18,7 @@ import subprocess
 import logging
 import time
 import math
+import datetime
 import re
 from pathlib import Path
 from typing import List, Dict, Optional, Tuple
@@ -333,6 +334,10 @@ class DiskManager:
         # Convertir tamaño a bytes
         size_str = device['size']
         size_bytes = self._parse_size(size_str)
+        
+        # Filtrar discos con tamaño 0 o inválido
+        if size_bytes <= 0:
+            return None
         
         # Información del disco
         model = device.get('model', 'Desconocido')
@@ -2128,6 +2133,9 @@ class RAIDManager:
         
         self.console.print(f"✅ Pool ZFS '{pool_name}' creado exitosamente", style="green")
         
+        # Configurar cache devices (SLOG/L2ARC) si hay dispositivos NVMe/SSD disponibles
+        self._configure_cache_devices(pool_name, disks)
+        
     def _ensure_zfs_module_loaded(self):
         """Asegura que el módulo ZFS esté cargado"""
         try:
@@ -2643,7 +2651,14 @@ options zfs l2arc_headroom=4
         
         # Preguntar sobre configuraciones adicionales una sola vez
         self.console.print("\n⚙️  Configuraciones adicionales para todos los datasets:")
-        enable_snapshots = self.console.confirm("¿Habilitar snapshots automáticos para los datasets?", default=False)
+        
+        # Explicar qué son los snapshots antes de preguntar
+        self.console.print("📸 Snapshots automáticos:")
+        self.console.print("   • Crean copias de seguridad automáticas de tus datos")
+        self.console.print("   • Permiten recuperar archivos borrados o versiones anteriores")
+        self.console.print("   • Podrás elegir la frecuencia (diario, semanal, mensual, etc.)")
+        
+        enable_snapshots = self.console.confirm("¿Habilitar snapshots automáticos para los datasets?", default=True)
         enable_quotas = self.console.confirm("¿Configurar cuotas de espacio para los datasets?", default=False)
         
         # Datasets recomendados con configuraciones específicas
@@ -2825,6 +2840,7 @@ options zfs l2arc_headroom=4
             enable_automount = self.console.confirm("   ¿Habilitar automontaje?", default=True)
             
             # Snapshots
+            self.console.print("\n   📸 Snapshots automáticos (copias de seguridad automáticas):")
             enable_snapshots = self.console.confirm("   ¿Habilitar snapshots automáticos?", default=True)
             
             # Cuota
@@ -2923,24 +2939,419 @@ options zfs l2arc_headroom=4
         self.console.print("   • Configurar cuota: zfs set quota=<tamaño> <dataset>")
     
     def _configure_dataset_snapshots(self, dataset_name: str):
-        """Configura snapshots automáticos para un dataset específico"""
+        """Configura snapshots automáticos para un dataset específico con selección de frecuencia"""
         self.console.print(f"      📸 Configurando snapshots para {dataset_name}")
         
-        snapshot_properties = [
-            ('com.sun:auto-snapshot', 'true', 'Snapshots automáticos'),
-            ('com.sun:auto-snapshot:hourly', 'true', 'Snapshots cada hora'),
-            ('com.sun:auto-snapshot:daily', 'true', 'Snapshots diarios'),
-            ('com.sun:auto-snapshot:weekly', 'true', 'Snapshots semanales'),
-            ('com.sun:auto-snapshot:monthly', 'true', 'Snapshots mensuales')
-        ]
+        # MEJORA 1: Verificar/instalar servicio zfs-auto-snapshot
+        if not self._verify_zfs_auto_snapshot_service():
+            return
         
+        # Preguntar qué tipo de snapshots quiere el usuario
+        self.console.print("         🕐 Frecuencia de snapshots automáticos:")
+        self.console.print("         1. Solo diarios (recomendado para uso general)")
+        self.console.print("         2. Solo semanales (para datos poco cambiantes)")
+        self.console.print("         3. Solo mensuales (para archivos estáticos)")
+        self.console.print("         4. Diarios + semanales (balance espacio/protección)")
+        self.console.print("         5. Semanales + mensuales (mínimo espacio)")
+        self.console.print("         6. Todos (cada hora, día, semana, mes) ⚠️ Consume más espacio")
+        
+        choice = self.console.prompt("         👉 Selecciona frecuencia", "1")
+        
+        # Configurar snapshots base (siempre necesario)
+        base_properties = [('com.sun:auto-snapshot', 'true', 'Snapshots automáticos base')]
+        
+        # Configurar según la elección del usuario
+        if choice == "1":  # Solo diarios
+            snapshot_properties = base_properties + [
+                ('com.sun:auto-snapshot:daily', 'true', 'Snapshots diarios')
+            ]
+        elif choice == "2":  # Solo semanales
+            snapshot_properties = base_properties + [
+                ('com.sun:auto-snapshot:weekly', 'true', 'Snapshots semanales')
+            ]
+        elif choice == "3":  # Solo mensuales
+            snapshot_properties = base_properties + [
+                ('com.sun:auto-snapshot:monthly', 'true', 'Snapshots mensuales')
+            ]
+        elif choice == "4":  # Diarios + semanales
+            snapshot_properties = base_properties + [
+                ('com.sun:auto-snapshot:daily', 'true', 'Snapshots diarios'),
+                ('com.sun:auto-snapshot:weekly', 'true', 'Snapshots semanales')
+            ]
+        elif choice == "5":  # Semanales + mensuales
+            snapshot_properties = base_properties + [
+                ('com.sun:auto-snapshot:weekly', 'true', 'Snapshots semanales'),
+                ('com.sun:auto-snapshot:monthly', 'true', 'Snapshots mensuales')
+            ]
+        elif choice == "6":  # Todos
+            snapshot_properties = base_properties + [
+                ('com.sun:auto-snapshot:hourly', 'true', 'Snapshots cada hora'),
+                ('com.sun:auto-snapshot:daily', 'true', 'Snapshots diarios'),
+                ('com.sun:auto-snapshot:weekly', 'true', 'Snapshots semanales'),
+                ('com.sun:auto-snapshot:monthly', 'true', 'Snapshots mensuales')
+            ]
+        else:  # Default a diarios
+            self.console.print("         ⚠️  Opción inválida, usando snapshots diarios por defecto", style="yellow")
+            snapshot_properties = base_properties + [
+                ('com.sun:auto-snapshot:daily', 'true', 'Snapshots diarios')
+            ]
+        
+        # Aplicar configuración seleccionada
         for prop, value, description in snapshot_properties:
             try:
                 self.system.run_command(['zfs', 'set', f'{prop}={value}', dataset_name])
             except subprocess.CalledProcessError:
                 self.console.print(f"         ⚠️  No se pudo configurar {description}", style="yellow")
         
-        self.console.print(f"         ✅ Snapshots automáticos habilitados")
+        # MEJORA 2: Crear snapshot de demostración
+        self._create_demo_snapshot(dataset_name)
+        
+        # Configurar retención de snapshots (nueva funcionalidad)
+        retention_config = self._configure_snapshot_retention(choice)
+        
+        # MEJORA 4: Mostrar métodos de acceso a snapshots (mejorado)
+        self._show_snapshot_access_methods(dataset_name)
+        
+        # Mostrar comandos útiles para gestión de snapshots
+        self._show_snapshot_management_commands(dataset_name)
+        
+        self.console.print(f"         ✅ Snapshots automáticos configurados")
+    
+    def _show_snapshot_retention_info(self, choice: str):
+        """Muestra información sobre retención de snapshots según la configuración"""
+        retention_info = {
+            "1": "Se mantendrán ~30 snapshots diarios",
+            "2": "Se mantendrán ~12 snapshots semanales", 
+            "3": "Se mantendrán ~12 snapshots mensuales",
+            "4": "Se mantendrán ~30 diarios + ~12 semanales",
+            "5": "Se mantendrán ~12 semanales + ~12 mensuales",
+            "6": "Se mantendrán ~24 por hora + ~30 diarios + ~12 semanales + ~12 mensuales"
+        }
+        
+        info = retention_info.get(choice, "Retención según configuración estándar")
+        self.console.print(f"         💡 {info}", style="blue")
+        
+        if choice == "6":
+            self.console.print("         ⚠️  Los snapshots por hora pueden consumir espacio significativo", style="yellow")
+    
+    def _configure_snapshot_retention(self, choice: str):
+        """Configura cuántos snapshots mantener vivos según la frecuencia seleccionada"""
+        self.console.print("         ⚙️  Configurando retención de snapshots...")
+        
+        # Configuraciones recomendadas para cada frecuencia
+        retention_config = {}
+        
+        if choice == "1":  # Solo diarios
+            retention_config['daily'] = self._ask_retention_count("diarios", 30)
+        elif choice == "2":  # Solo semanales
+            retention_config['weekly'] = self._ask_retention_count("semanales", 12)
+        elif choice == "3":  # Solo mensuales
+            retention_config['monthly'] = self._ask_retention_count("mensuales", 12)
+        elif choice == "4":  # Diarios + semanales
+            retention_config['daily'] = self._ask_retention_count("diarios", 30)
+            retention_config['weekly'] = self._ask_retention_count("semanales", 12)
+        elif choice == "5":  # Semanales + mensuales
+            retention_config['weekly'] = self._ask_retention_count("semanales", 12)
+            retention_config['monthly'] = self._ask_retention_count("mensuales", 12)
+        elif choice == "6":  # Todos
+            retention_config['hourly'] = self._ask_retention_count("por hora", 24)
+            retention_config['daily'] = self._ask_retention_count("diarios", 30)
+            retention_config['weekly'] = self._ask_retention_count("semanales", 12)
+            retention_config['monthly'] = self._ask_retention_count("mensuales", 12)
+        
+        # Aplicar configuración de retención
+        self._apply_retention_configuration(retention_config)
+        
+        return retention_config
+    
+    def _ask_retention_count(self, frequency_name: str, recommended: int) -> int:
+        """Pregunta al usuario cuántos snapshots mantener para una frecuencia específica"""
+        self.console.print(f"         📅 Snapshots {frequency_name}:")
+        self.console.print(f"            Recomendado: {recommended} snapshots")
+        
+        while True:
+            try:
+                count = self.console.prompt(f"            ¿Cuántos snapshots {frequency_name} mantener?", str(recommended))
+                count = int(count.strip())
+                
+                if count < 1:
+                    self.console.print("            ❌ Debe ser al menos 1", style="red")
+                    continue
+                elif count > 100:
+                    if not self.console.confirm(f"            ⚠️  {count} snapshots es mucho. ¿Continuar?", default=False):
+                        continue
+                
+                # Mostrar estimación de espacio si es relevante
+                if frequency_name == "por hora" and count > 48:
+                    self.console.print("            ⚠️  Muchos snapshots por hora pueden consumir espacio significativo", style="yellow")
+                elif frequency_name == "diarios" and count > 60:
+                    self.console.print("            💡 Considere usar snapshots semanales para períodos largos", style="blue")
+                
+                return count
+                
+            except ValueError:
+                self.console.print("            ❌ Ingrese un número válido", style="red")
+    
+    def _apply_retention_configuration(self, retention_config: dict):
+        """Aplica la configuración de retención al archivo de configuración del sistema"""
+        self.console.print("         🔧 Aplicando configuración de retención...")
+        
+        config_file = '/etc/default/zfs-auto-snapshot'
+        temp_file = '/tmp/zfs_auto_snapshot_config.tmp'
+        
+        try:
+            # Leer configuración actual si existe
+            current_config = {}
+            if os.path.exists(config_file):
+                try:
+                    result = self.system.run_command(['sudo', 'cat', config_file], check=False)
+                    if result.returncode == 0:
+                        for line in result.stdout.strip().split('\n'):
+                            if '=' in line and not line.strip().startswith('#'):
+                                key, value = line.split('=', 1)
+                                current_config[key.strip()] = value.strip()
+                except:
+                    pass
+            
+            # Preparar nueva configuración
+            new_config = {
+                'HOURLY': str(retention_config.get('hourly', current_config.get('HOURLY', '0'))),
+                'DAILY': str(retention_config.get('daily', current_config.get('DAILY', '0'))),
+                'WEEKLY': str(retention_config.get('weekly', current_config.get('WEEKLY', '0'))),
+                'MONTHLY': str(retention_config.get('monthly', current_config.get('MONTHLY', '0')))
+            }
+            
+            # Crear contenido del archivo de configuración
+            config_content = f"""# ZFS Auto-Snapshot Configuration
+# Configurado por raid_manager.py - {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
+
+# Número de snapshots a mantener para cada frecuencia
+# 0 = deshabilitado, >0 = número de snapshots a conservar
+
+# Snapshots por hora (0-24 recomendado)
+HOURLY={new_config['HOURLY']}
+
+# Snapshots diarios (7-60 recomendado)
+DAILY={new_config['DAILY']}
+
+# Snapshots semanales (4-12 recomendado)
+WEEKLY={new_config['WEEKLY']}
+
+# Snapshots mensuales (6-24 recomendado)
+MONTHLY={new_config['MONTHLY']}
+
+# Configuraciones adicionales
+VERBOSE=false
+DRYRUN=false
+"""
+            
+            # Escribir a archivo temporal
+            with open(temp_file, 'w') as f:
+                f.write(config_content)
+            
+            # Copiar con sudo al destino final
+            result = self.system.run_command(['sudo', 'cp', temp_file, config_file], check=False)
+            
+            if result.returncode == 0:
+                self.console.print("         ✅ Configuración de retención aplicada", style="green")
+                
+                # Mostrar resumen de configuración
+                self._show_retention_summary(retention_config)
+                
+                # Limpiar archivo temporal
+                os.remove(temp_file)
+                
+            else:
+                self.console.print("         ⚠️  Error aplicando configuración, usando valores por defecto", style="yellow")
+                
+        except Exception as e:
+            self.console.print(f"         ⚠️  Error configurando retención: {e}", style="yellow")
+            self.console.print("         💡 Puedes configurar manualmente editando /etc/default/zfs-auto-snapshot", style="blue")
+    
+    def _show_retention_summary(self, retention_config: dict):
+        """Muestra un resumen de la configuración de retención aplicada"""
+        self.console.print("         📊 Configuración de retención aplicada:", style="blue")
+        
+        frequency_names = {
+            'hourly': 'Por hora',
+            'daily': 'Diarios', 
+            'weekly': 'Semanales',
+            'monthly': 'Mensuales'
+        }
+        
+        for freq, count in retention_config.items():
+            name = frequency_names.get(freq, freq.capitalize())
+            self.console.print(f"            📅 {name}: {count} snapshots")
+        
+        # Calcular estimación de snapshots totales
+        total_snapshots = sum(retention_config.values())
+        self.console.print(f"         💾 Total máximo de snapshots por dataset: ~{total_snapshots}")
+        
+        if total_snapshots > 50:
+            self.console.print("         💡 Considera monitorear el uso de espacio regularmente", style="blue")
+    
+    def _show_snapshot_management_commands(self, dataset_name: str):
+        """Muestra comandos útiles para gestionar snapshots"""
+        self.console.print(f"         📚 Comandos útiles para gestionar snapshots:", style="blue")
+        self.console.print(f"         • Ver snapshots: zfs list -t snapshot {dataset_name}")
+        self.console.print(f"         • Crear manual: zfs snapshot {dataset_name}@manual-$(date +%Y%m%d)")
+        self.console.print(f"         • Restaurar archivo: zfs send/recv o acceso directo en .zfs/snapshot/")
+        self.console.print(f"         • Eliminar snapshot: zfs destroy {dataset_name}@nombre_snapshot")
+    
+    def _verify_zfs_auto_snapshot_service(self) -> bool:
+        """MEJORA 1: Verifica si el servicio zfs-auto-snapshot está instalado y lo instala si es necesario"""
+        self.console.print("         🔍 Verificando servicio zfs-auto-snapshot...")
+        
+        # Verificar si zfs-auto-snapshot está instalado
+        try:
+            self.system.run_command(['which', 'zfs-auto-snapshot'])
+            self.console.print("         ✅ Servicio zfs-auto-snapshot encontrado", style="green")
+            
+            # Verificar que los cron jobs estén configurados
+            self._verify_snapshot_cron_jobs()
+            return True
+            
+        except subprocess.CalledProcessError:
+            self.console.print("         ❌ zfs-auto-snapshot no está instalado", style="red")
+            
+            if self.console.confirm("         ¿Instalar zfs-auto-snapshot automáticamente?", default=True):
+                return self._install_zfs_auto_snapshot()
+            else:
+                self.console.print("         ⚠️  Sin zfs-auto-snapshot, los snapshots automáticos no funcionarán", style="yellow")
+                self.console.print("         💡 Instala manualmente: apt install zfs-auto-snapshot", style="blue")
+                return False
+    
+    def _verify_snapshot_cron_jobs(self):
+        """Verifica que los cron jobs de snapshots estén activos"""
+        cron_files = [
+            '/etc/cron.hourly/zfs-auto-snapshot',
+            '/etc/cron.daily/zfs-auto-snapshot', 
+            '/etc/cron.weekly/zfs-auto-snapshot',
+            '/etc/cron.monthly/zfs-auto-snapshot'
+        ]
+        
+        active_jobs = []
+        for cron_file in cron_files:
+            if os.path.exists(cron_file) and os.access(cron_file, os.X_OK):
+                active_jobs.append(cron_file.split('/')[-2])  # hourly, daily, etc.
+        
+        if active_jobs:
+            self.console.print(f"         ✅ Cron jobs activos: {', '.join(active_jobs)}", style="green")
+        else:
+            self.console.print("         ⚠️  No se encontraron cron jobs activos", style="yellow")
+    
+    def _install_zfs_auto_snapshot(self) -> bool:
+        """Instala el servicio zfs-auto-snapshot"""
+        self.console.print("         🔄 Instalando zfs-auto-snapshot...")
+        
+        try:
+            # Actualizar lista de paquetes
+            self.console.print("         📦 Actualizando lista de paquetes...")
+            self.system.run_command(['sudo', 'apt', 'update', '-qq'])
+            
+            # Instalar zfs-auto-snapshot
+            self.console.print("         📥 Instalando zfs-auto-snapshot...")
+            result = self.system.run_command(['sudo', 'apt', 'install', '-y', 'zfs-auto-snapshot'])
+            
+            if result.returncode == 0:
+                self.console.print("         ✅ zfs-auto-snapshot instalado exitosamente", style="green")
+                
+                # Verificar instalación
+                try:
+                    self.system.run_command(['which', 'zfs-auto-snapshot'])
+                    self.console.print("         ✅ Instalación verificada", style="green")
+                    self._verify_snapshot_cron_jobs()
+                    return True
+                except subprocess.CalledProcessError:
+                    self.console.print("         ❌ Error verificando instalación", style="red")
+                    return False
+            else:
+                self.console.print("         ❌ Error durante la instalación", style="red")
+                return False
+                
+        except subprocess.CalledProcessError as e:
+            self.console.print(f"         ❌ Error instalando zfs-auto-snapshot: {e}", style="red")
+            self.console.print("         💡 Instala manualmente: sudo apt install zfs-auto-snapshot", style="blue")
+            return False
+    
+    def _create_demo_snapshot(self, dataset_name: str):
+        """MEJORA 2: Crea un snapshot de demostración para probar el sistema"""
+        self.console.print("         🧪 Creando snapshot de demostración...")
+        
+        try:
+            # Crear timestamp para el snapshot
+            import datetime
+            timestamp = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
+            snapshot_name = f"{dataset_name}@demo-{timestamp}"
+            
+            # Crear el snapshot
+            self.system.run_command(['zfs', 'snapshot', snapshot_name])
+            self.console.print(f"         ✅ Snapshot creado: {snapshot_name}", style="green")
+            
+            # Verificar que se creó correctamente
+            try:
+                result = self.system.run_command(['zfs', 'list', '-t', 'snapshot', snapshot_name])
+                if result.returncode == 0:
+                    self.console.print("         ✅ Snapshot verificado correctamente", style="green")
+                    
+                    # Mostrar información del snapshot
+                    self._show_demo_snapshot_info(dataset_name, snapshot_name)
+                    
+            except subprocess.CalledProcessError:
+                self.console.print("         ⚠️  No se pudo verificar el snapshot", style="yellow")
+                
+        except subprocess.CalledProcessError as e:
+            self.console.print(f"         ❌ Error creando snapshot de demostración: {e}", style="red")
+    
+    def _show_demo_snapshot_info(self, dataset_name: str, snapshot_name: str):
+        """Muestra información del snapshot de demostración creado"""
+        self.console.print("         📊 Información del snapshot de demostración:", style="blue")
+        
+        try:
+            # Obtener información del snapshot
+            result = self.system.run_command(['zfs', 'list', '-t', 'snapshot', '-o', 'name,used,refer', snapshot_name])
+            lines = result.stdout.strip().split('\n')
+            if len(lines) > 1:
+                self.console.print(f"         📸 {lines[1]}")
+            
+            # Mostrar cómo acceder al snapshot
+            pool_name = dataset_name.split('/')[0]
+            dataset_path = dataset_name.replace(pool_name, f"/{pool_name}")
+            snapshot_timestamp = snapshot_name.split('@')[1]
+            
+            self.console.print(f"         🔗 Acceso al snapshot:")
+            self.console.print(f"             • Ruta directa: {dataset_path}/.zfs/snapshot/{snapshot_timestamp}/")
+            self.console.print(f"             • Navegación: cd {dataset_path}/.zfs/snapshot/")
+            
+        except subprocess.CalledProcessError:
+            self.console.print("         ⚠️  No se pudo obtener información detallada", style="yellow")
+    
+    def _show_snapshot_access_methods(self, dataset_name: str):
+        """MEJORA 4: Muestra métodos detallados para acceder a snapshots"""
+        pool_name = dataset_name.split('/')[0]
+        dataset_path = dataset_name.replace(pool_name, f"/{pool_name}")
+        
+        self.console.print("         🔗 Métodos de acceso a snapshots:", style="blue")
+        self.console.print("         ")
+        self.console.print("         📁 1. Acceso directo por navegación:")
+        self.console.print(f"            cd {dataset_path}/.zfs/snapshot/")
+        self.console.print("            ls -la                    # Ver todos los snapshots")
+        self.console.print("            cd auto-2024MMDD-HHMM/    # Entrar en snapshot específico")
+        self.console.print("            ")
+        self.console.print("         📁 2. Restaurar archivos específicos:")
+        self.console.print(f"            cp {dataset_path}/.zfs/snapshot/SNAPSHOT_NAME/archivo.txt {dataset_path}/")
+        self.console.print("            # Copia archivo desde snapshot a ubicación actual")
+        self.console.print("            ")
+        self.console.print("         📁 3. Explorar contenido de snapshots:")
+        self.console.print(f"            find {dataset_path}/.zfs/snapshot/ -name '*archivo*' -type f")
+        self.console.print("            # Busca archivos en todos los snapshots")
+        self.console.print("            ")
+        self.console.print("         📁 4. Comparar versiones:")
+        self.console.print(f"            diff {dataset_path}/archivo.txt {dataset_path}/.zfs/snapshot/SNAPSHOT/archivo.txt")
+        self.console.print("            # Compara archivo actual con versión en snapshot")
+        self.console.print("            ")
+        self.console.print("         💡 Los snapshots son de solo lectura y no ocupan espacio inicialmente")
+        self.console.print("         💡 Solo los cambios posteriores al snapshot consumen espacio adicional")
     
     def _configure_dataset_quota(self, dataset_name: str, suggested_quota: str):
         """Configura cuota para un dataset específico"""
@@ -3266,6 +3677,411 @@ options zfs l2arc_headroom=4
         for warning in warnings:
             self.console.print(f"   {warning}", style="yellow")
     
+    def _configure_cache_devices(self, pool_name: str, pool_disks: List[Disk]):
+        """Configura dispositivos de cache (SLOG/L2ARC) para el pool ZFS"""
+        self.console.print_panel(
+            f"Configuración de dispositivos de cache para '{pool_name}'\n"
+            "Los dispositivos de cache mejoran el rendimiento del pool ZFS",
+            title="🚀 Cache Devices",
+            style="blue"
+        )
+        
+        # Detectar dispositivos disponibles para cache
+        cache_devices = self._detect_cache_devices(pool_disks)
+        
+        if not cache_devices['nvme'] and not cache_devices['ssd']:
+            self.console.print_panel(
+                "⚠️  NO SE DETECTARON DISPOSITIVOS NVMe O SSD ADECUADOS\n\n"
+                "• Los dispositivos de cache deben ser más rápidos que el almacenamiento principal\n"
+                "• Usar dispositivos lentos como cache puede REDUCIR el rendimiento\n"
+                "• Se recomienda conseguir un dispositivo NVMe o SSD para cache",
+                title="❌ Sin dispositivos de cache",
+                style="yellow"
+            )
+            return
+        
+        # Mostrar información sobre cache devices
+        self._show_cache_info()
+        
+        # Mostrar dispositivos disponibles
+        self._show_available_cache_devices(cache_devices)
+        
+        # Preguntar si quiere configurar cache devices
+        if not self.console.confirm("¿Deseas configurar dispositivos de cache para mejorar el rendimiento?", default=True):
+            self.console.print("⏭️  Saltando configuración de cache devices", style="yellow")
+            return
+        
+        # Menú de opciones de cache
+        self._show_cache_menu(pool_name, cache_devices)
+    
+    def _detect_cache_devices(self, pool_disks: List[Disk]) -> Dict[str, List[Disk]]:
+        """Detecta dispositivos disponibles para cache (NVMe/SSD)"""
+        all_disks = self.disk_manager.detect_disks()
+        pool_disk_names = {disk.name for disk in pool_disks}
+        
+        cache_devices = {
+            'nvme': [],
+            'ssd': [],
+            'other': []
+        }
+        
+        for disk in all_disks:
+            # Excluir discos del sistema y discos usados en el pool principal
+            if disk.is_system or disk.name in pool_disk_names:
+                continue
+            
+            # Clasificar por tipo
+            if disk.name.startswith('nvme'):
+                cache_devices['nvme'].append(disk)
+            elif self._is_ssd(disk):
+                cache_devices['ssd'].append(disk)
+            else:
+                cache_devices['other'].append(disk)
+        
+        return cache_devices
+    
+    def _is_ssd(self, disk: Disk) -> bool:
+        """Verifica si un disco es SSD"""
+        try:
+            # Verificar ROTA (rotational) - 0 significa SSD
+            result = self.system.run_command(['lsblk', '-dpno', 'ROTA', f'/dev/{disk.name}'])
+            return result.stdout.strip() == '0'
+        except subprocess.CalledProcessError:
+            return False
+    
+    def _show_cache_info(self):
+        """Muestra información sobre cache devices"""
+        info_text = (
+            "🚀 L2ARC (Level 2 Adaptive Replacement Cache):\n"
+            "   • Cache de segundo nivel para lecturas frecuentes\n"
+            "   • Ideal: SSD rápido (NVMe > SATA SSD)\n"
+            "   • Mejora rendimiento de lectura en datasets accedidos frecuentemente\n"
+            "   • No es crítico - si falla, el pool sigue funcionando\n\n"
+            "📝 SLOG (Separate Intent Log):\n"
+            "   • Log de transacciones para escrituras síncronas\n"
+            "   • Ideal: SSD con baja latencia (NVMe recomendado)\n"
+            "   • Mejora rendimiento de escrituras síncronas (bases de datos, VMs)\n"
+            "   • Crítico para integridad - usar dispositivos confiables"
+        )
+        self.console.print_panel(info_text, title="💡 Información sobre Cache Devices")
+    
+    def _show_available_cache_devices(self, cache_devices: Dict[str, List[Disk]]):
+        """Muestra dispositivos disponibles para cache"""
+        if RICH_AVAILABLE:
+            table = Table(title="💾 Dispositivos Disponibles para Cache")
+            table.add_column("Tipo", style="cyan")
+            table.add_column("Dispositivo", style="green")
+            table.add_column("Tamaño", style="yellow")
+            table.add_column("Modelo", style="blue")
+            table.add_column("Recomendación", style="magenta")
+            
+            # Dispositivos NVMe
+            for disk in cache_devices['nvme']:
+                table.add_row(
+                    "🚀 NVMe", 
+                    disk.name, 
+                    disk.size_human, 
+                    disk.model,
+                    "✅ EXCELENTE"
+                )
+            
+            # Dispositivos SSD
+            for disk in cache_devices['ssd']:
+                table.add_row(
+                    "💾 SSD", 
+                    disk.name, 
+                    disk.size_human, 
+                    disk.model,
+                    "⚠️ ACEPTABLE"
+                )
+            
+            # Otros dispositivos (no recomendados)
+            for disk in cache_devices['other']:
+                table.add_row(
+                    "🐌 HDD", 
+                    disk.name, 
+                    disk.size_human, 
+                    disk.model,
+                    "❌ NO RECOMENDADO"
+                )
+            
+            self.console.console.print(table)
+        else:
+            print("\n💾 Dispositivos Disponibles para Cache:")
+            for disk in cache_devices['nvme']:
+                print(f"  🚀 {disk.name} - {disk.size_human} - {disk.model} (NVMe - EXCELENTE)")
+            for disk in cache_devices['ssd']:
+                print(f"  💾 {disk.name} - {disk.size_human} - {disk.model} (SSD - ACEPTABLE)")
+    
+    def _show_cache_menu(self, pool_name: str, cache_devices: Dict[str, List[Disk]]):
+        """Muestra menú de opciones de cache"""
+        self.console.print("\n🎯 Opciones de configuración de cache:")
+        self.console.print("   1. Solo L2ARC (cache de lectura)")
+        self.console.print("   2. Solo SLOG (log de escritura)")
+        self.console.print("   3. L2ARC y SLOG en dispositivos separados")
+        self.console.print("   4. L2ARC y SLOG particionados en el mismo dispositivo")
+        self.console.print("   0. Saltar configuración de cache")
+        
+        while True:
+            choice = self.console.prompt("👉 Selecciona opción", "1")
+            
+            if choice == "0":
+                self.console.print("⏭️  Saltando configuración de cache", style="yellow")
+                break
+            elif choice == "1":
+                self._setup_l2arc_only(pool_name, cache_devices)
+                break
+            elif choice == "2":
+                self._setup_slog_only(pool_name, cache_devices)
+                break
+            elif choice == "3":
+                self._setup_separate_cache_devices(pool_name, cache_devices)
+                break
+            elif choice == "4":
+                self._setup_partitioned_cache(pool_name, cache_devices)
+                break
+            else:
+                self.console.print("❌ Opción inválida", style="red")
+    
+    def _setup_l2arc_only(self, pool_name: str, cache_devices: Dict[str, List[Disk]]):
+        """Configura solo L2ARC"""
+        self.console.print_panel("Configurando L2ARC (cache de lectura)", title="🚀 L2ARC")
+        
+        # Seleccionar dispositivo
+        device = self._select_cache_device(cache_devices, "L2ARC")
+        if not device:
+            return
+        
+        # Limpiar dispositivo si es necesario
+        if not self._prepare_cache_device(device):
+            return
+        
+        # Agregar L2ARC al pool
+        try:
+            self.console.print(f"📦 Agregando {device.name} como L2ARC al pool {pool_name}...")
+            self.system.run_command(['zpool', 'add', pool_name, 'cache', f'/dev/{device.name}'])
+            self.console.print("✅ L2ARC configurado exitosamente", style="green")
+        except subprocess.CalledProcessError as e:
+            self.console.print(f"❌ Error configurando L2ARC: {e}", style="red")
+    
+    def _setup_slog_only(self, pool_name: str, cache_devices: Dict[str, List[Disk]]):
+        """Configura solo SLOG"""
+        self.console.print_panel("Configurando SLOG (log de escritura)", title="📝 SLOG")
+        
+        # Seleccionar dispositivo
+        device = self._select_cache_device(cache_devices, "SLOG")
+        if not device:
+            return
+        
+        # Limpiar dispositivo si es necesario
+        if not self._prepare_cache_device(device):
+            return
+        
+        # Agregar SLOG al pool
+        try:
+            self.console.print(f"📦 Agregando {device.name} como SLOG al pool {pool_name}...")
+            self.system.run_command(['zpool', 'add', pool_name, 'log', f'/dev/{device.name}'])
+            self.console.print("✅ SLOG configurado exitosamente", style="green")
+        except subprocess.CalledProcessError as e:
+            self.console.print(f"❌ Error configurando SLOG: {e}", style="red")
+    
+    def _setup_separate_cache_devices(self, pool_name: str, cache_devices: Dict[str, List[Disk]]):
+        """Configura L2ARC y SLOG en dispositivos separados"""
+        self.console.print_panel("Configurando L2ARC y SLOG en dispositivos separados", title="🔄 Dual Cache")
+        
+        # Verificar que hay al menos 2 dispositivos
+        available_count = len(cache_devices['nvme']) + len(cache_devices['ssd'])
+        if available_count < 2:
+            self.console.print("❌ Se necesitan al menos 2 dispositivos para configuración separada", style="red")
+            return
+        
+        # Seleccionar dispositivo para L2ARC
+        self.console.print("\n🚀 Seleccionar dispositivo para L2ARC:")
+        l2arc_device = self._select_cache_device(cache_devices, "L2ARC")
+        if not l2arc_device:
+            return
+        
+        # Remover el dispositivo seleccionado de las opciones
+        for device_type in cache_devices:
+            cache_devices[device_type] = [d for d in cache_devices[device_type] if d.name != l2arc_device.name]
+        
+        # Seleccionar dispositivo para SLOG
+        self.console.print("\n📝 Seleccionar dispositivo para SLOG:")
+        slog_device = self._select_cache_device(cache_devices, "SLOG")
+        if not slog_device:
+            return
+        
+        # Preparar dispositivos
+        if not self._prepare_cache_device(l2arc_device) or not self._prepare_cache_device(slog_device):
+            return
+        
+        # Configurar L2ARC y SLOG
+        try:
+            self.console.print(f"📦 Configurando cache devices...")
+            self.system.run_command(['zpool', 'add', pool_name, 'cache', f'/dev/{l2arc_device.name}'])
+            self.system.run_command(['zpool', 'add', pool_name, 'log', f'/dev/{slog_device.name}'])
+            self.console.print("✅ L2ARC y SLOG configurados exitosamente", style="green")
+        except subprocess.CalledProcessError as e:
+            self.console.print(f"❌ Error configurando cache devices: {e}", style="red")
+    
+    def _setup_partitioned_cache(self, pool_name: str, cache_devices: Dict[str, List[Disk]]):
+        """Configura L2ARC y SLOG particionados en el mismo dispositivo"""
+        self.console.print_panel("Configurando L2ARC y SLOG particionados en el mismo dispositivo", title="🔀 Cache Particionado")
+        
+        # Seleccionar dispositivo
+        device = self._select_cache_device(cache_devices, "Cache particionado")
+        if not device:
+            return
+        
+        # Verificar tamaño mínimo (al menos 4GB para particionar)
+        if device.size < 4 * 1024**3:  # 4GB
+            self.console.print("❌ El dispositivo debe tener al menos 4GB para particionado", style="red")
+            return
+        
+        # Limpiar dispositivo
+        if not self._prepare_cache_device(device):
+            return
+        
+        # Crear particiones
+        try:
+            self.console.print(f"🔧 Particionando {device.name}...")
+            
+            # Calcular tamaños (SLOG: 10% o máximo 32GB, resto para L2ARC)
+            total_size = device.size
+            slog_size = min(int(total_size * 0.1), 32 * 1024**3)  # 10% o 32GB máximo
+            
+            # Limpiar tabla de particiones primero
+            self.console.print("   • Limpiando tabla de particiones...")
+            self.system.run_command(['sgdisk', '--zap-all', f'/dev/{device.name}'])
+            
+            # Crear nueva tabla GPT y particiones
+            self.console.print("   • Creando particiones...")
+            # Crear SLOG (partición 1)
+            self.system.run_command(['sgdisk', '-n', f'1:0:+{slog_size // 512}', f'/dev/{device.name}'])
+            # Crear L2ARC (partición 2 - resto del espacio)
+            self.system.run_command(['sgdisk', '-n', '2:0:0', f'/dev/{device.name}'])
+            
+            # Establecer etiquetas para identificar las particiones
+            self.system.run_command(['sgdisk', '-c', '1:ZFS-SLOG', f'/dev/{device.name}'])
+            self.system.run_command(['sgdisk', '-c', '2:ZFS-L2ARC', f'/dev/{device.name}'])
+            
+            # Notificar al kernel sobre cambios en particiones
+            self.console.print("   • Actualizando tabla de particiones...")
+            self.system.run_command(['partprobe', f'/dev/{device.name}'])
+            self.system.run_command(['udevadm', 'settle'])
+            
+            # Determinar nombres de particiones según el tipo de dispositivo
+            if device.name.startswith('nvme'):
+                slog_partition = f"{device.name}p1"
+                l2arc_partition = f"{device.name}p2"
+            else:
+                slog_partition = f"{device.name}1"
+                l2arc_partition = f"{device.name}2"
+            
+            # Esperar a que las particiones estén disponibles
+            self.console.print("   • Esperando a que las particiones estén disponibles...")
+            import time
+            max_wait = 10
+            for i in range(max_wait):
+                if (Path(f'/dev/{slog_partition}').exists() and 
+                    Path(f'/dev/{l2arc_partition}').exists()):
+                    break
+                time.sleep(1)
+                if i == max_wait - 1:
+                    raise Exception(f"Las particiones no están disponibles después de {max_wait} segundos")
+            
+            # Agregar particiones al pool
+            self.console.print("📦 Agregando particiones al pool...")
+            self.system.run_command(['zpool', 'add', pool_name, 'log', f'/dev/{slog_partition}'])
+            self.system.run_command(['zpool', 'add', pool_name, 'cache', f'/dev/{l2arc_partition}'])
+            
+            self.console.print("✅ Cache particionado configurado exitosamente", style="green")
+            self.console.print(f"   📝 SLOG: {slog_partition} ({slog_size // (1024**3)}GB)")
+            self.console.print(f"   🚀 L2ARC: {l2arc_partition} ({(total_size - slog_size) // (1024**3)}GB)")
+            
+        except subprocess.CalledProcessError as e:
+            self.console.print(f"❌ Error configurando cache particionado: {e}", style="red")
+        except Exception as e:
+            self.console.print(f"❌ Error configurando cache particionado: {e}", style="red")
+    
+    def _select_cache_device(self, cache_devices: Dict[str, List[Disk]], purpose: str) -> Optional[Disk]:
+        """Selecciona un dispositivo para cache"""
+        available_devices = cache_devices['nvme'] + cache_devices['ssd']
+        
+        if not available_devices:
+            self.console.print(f"❌ No hay dispositivos disponibles para {purpose}", style="red")
+            return None
+        
+        if len(available_devices) == 1:
+            device = available_devices[0]
+            device_type = "NVMe" if device.name.startswith('nvme') else "SSD"
+            if self.console.confirm(f"¿Usar {device.name} ({device.size_human} {device_type}) para {purpose}?", default=True):
+                return device
+            return None
+        
+        # Mostrar opciones
+        self.console.print(f"\n💾 Dispositivos disponibles para {purpose}:")
+        for i, device in enumerate(available_devices, 1):
+            device_type = "🚀 NVMe" if device.name.startswith('nvme') else "💾 SSD"
+            self.console.print(f"   {i}. {device_type} {device.name} - {device.size_human} - {device.model}")
+        
+        while True:
+            choice = self.console.prompt("👉 Selecciona dispositivo", "1")
+            try:
+                index = int(choice) - 1
+                if 0 <= index < len(available_devices):
+                    return available_devices[index]
+                else:
+                    self.console.print("❌ Opción inválida", style="red")
+            except ValueError:
+                if choice.lower() == 'q':
+                    return None
+                self.console.print("❌ Por favor ingresa un número válido", style="red")
+    
+    def _prepare_cache_device(self, device: Disk) -> bool:
+        """Prepara un dispositivo para usar como cache (limpia si es necesario)"""
+        # Verificar si el dispositivo tiene datos
+        if device.has_partitions or device.filesystem_type:
+            self.console.print_panel(
+                f"⚠️  ADVERTENCIA: El dispositivo {device.name} contiene datos\n"
+                f"Configurarlo como cache DESTRUIRÁ todos los datos existentes\n\n"
+                f"Datos detectados:\n"
+                f"• Particiones: {'Sí' if device.has_partitions else 'No'}\n"
+                f"• Filesystem: {device.filesystem_type or 'Ninguno'}\n"
+                f"• Puntos de montaje: {', '.join(device.mount_points) if device.mount_points else 'Ninguno'}",
+                title="🚨 Confirmación Destructiva",
+                style="red"
+            )
+            
+            if not self.console.confirm(f"¿DESTRUIR todos los datos en {device.name} para configurar cache?", default=False):
+                self.console.print("❌ Operación cancelada", style="yellow")
+                return False
+        
+        # Limpiar dispositivo
+        try:
+            self.console.print(f"🧹 Limpiando dispositivo {device.name}...")
+            
+            # Desmontar particiones si están montadas
+            if device.mount_points:
+                for mount_point in device.mount_points:
+                    try:
+                        self.system.run_command(['umount', mount_point])
+                    except subprocess.CalledProcessError:
+                        pass
+            
+            # Limpiar firmas de filesystem
+            self.system.run_command(['wipefs', '-a', f'/dev/{device.name}'])
+            
+            # Limpiar tabla de particiones
+            self.system.run_command(['sgdisk', '-Z', f'/dev/{device.name}'])
+            
+            self.console.print(f"✅ Dispositivo {device.name} preparado", style="green")
+            return True
+            
+        except subprocess.CalledProcessError as e:
+            self.console.print(f"❌ Error preparando dispositivo: {e}", style="red")
+            return False
+
     def manage_existing(self):
         """Gestiona pools/filesystems existentes"""
         pass
