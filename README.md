@@ -90,6 +90,7 @@ La placa es funcional con cualquier cargador de portátil donde el conector sea 
 En el siguiente enlace se ve un ejemplo de cargador que se podría comprar para el proyecto:
 
 <img width="949" height="717" alt="Image" src="https://github.com/user-attachments/assets/6fa7047d-bdc5-4190-9902-7c9ab37d4b9e" />
+
 [Cargador 180W compatible](https://s.click.aliexpress.com/e/_oEOlrhT)
 
 
@@ -102,8 +103,7 @@ Se puede utilizar el disipador original de raspberry pi sin ningún problema, po
 
 <img width="937" height="820" alt="Image" src="https://github.com/user-attachments/assets/7830de5b-cddf-4bff-88c0-faa8644ca7ef" />
 
-[Disipador CM5](
-<img width="937" height="820" alt="Image" src="https://github.com/user-attachments/assets/7830de5b-cddf-4bff-88c0-faa8644ca7ef" />)
+[Disipador CM5](https://s.click.aliexpress.com/e/_opSJY8H)
 
 
 Lo importante es atornillar dos tornillos del disipador en la zona donde la PCB no tiene tornillos y posteriormente con las tuercas plásticas más delgadas poner los dos tornillos de la PCB.
