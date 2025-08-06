@@ -150,6 +150,479 @@ class UIConsole:
                     return False
                 print("Por favor responde 's' (sí) o 'n' (no)")
 
+class RequirementsChecker:
+    """Verifica y gestiona los requisitos del sistema"""
+    
+    def __init__(self, console: UIConsole, system_manager):
+        self.console = console
+        self.system = system_manager
+        self.required_packages = {
+            'basic': ['util-linux', 'parted'],
+            'btrfs': ['btrfs-progs'],
+            'zfs': ['zfsutils-linux'],
+            'mdadm': ['mdadm']
+        }
+        self.required_commands = {
+            'basic': ['lsblk', 'parted', 'wipefs'],
+            'btrfs': ['mkfs.btrfs', 'btrfs'],
+            'zfs': ['zpool', 'zfs'],
+            'mdadm': ['mdadm']
+        }
+    
+    def check_all_requirements(self) -> bool:
+        """Verifica todos los requisitos del sistema"""
+        self.console.print_panel(
+            "Verificando requisitos del sistema...",
+            title="🔍 Verificación de Requisitos"
+        )
+        
+        # Verificar y instalar paquetes de Python necesarios
+        python_ok = self._check_and_install_python_packages()
+        
+        # Verificar herramientas básicas del sistema
+        basic_ok = self._check_basic_tools()
+        
+        # Verificar sistemas RAID
+        raid_tools = self._check_raid_tools()
+        
+        # Mostrar resumen de herramientas disponibles
+        self._show_tools_summary(raid_tools)
+        
+        # Verificar si faltan herramientas RAID y ofrecer instalación
+        missing_tools = [tool for tool, available in raid_tools.items() if not available]
+        available_tools = [tool for tool, available in raid_tools.items() if available]
+        
+        if not any(raid_tools.values()):
+            # No hay ninguna herramienta RAID
+            self.console.print_panel(
+                "❌ No se encontraron herramientas RAID en el sistema.\n"
+                "No es posible continuar sin al menos BTRFS o ZFS.",
+                title="🚫 Sin herramientas RAID",
+                style="red"
+            )
+            
+            if self.console.confirm("¿Deseas instalar las herramientas RAID necesarias?", default=True):
+                return self._install_missing_packages()
+            else:
+                return False
+        
+        elif missing_tools:
+            # Hay algunas herramientas pero faltan otras
+            missing_list = ", ".join(tool.upper() for tool in missing_tools)
+            available_list = ", ".join(tool.upper() for tool in available_tools)
+            
+            self.console.print_panel(
+                f"✅ Herramientas disponibles: {available_list}\n"
+                f"❌ Herramientas faltantes: {missing_list}\n\n"
+                f"Puedes trabajar con las herramientas disponibles o instalar las faltantes para más opciones.",
+                title="⚙️ Estado de Herramientas RAID",
+                style="yellow"
+            )
+            
+            if self.console.confirm(f"¿Deseas instalar las herramientas faltantes ({missing_list})?", default=False):
+                return self._install_selective_packages(missing_tools)
+        
+        return True
+    
+    def _check_and_install_python_packages(self) -> bool:
+        """Verifica e instala paquetes de Python necesarios"""
+        self.console.print("🐍 Verificando paquetes de Python...")
+        
+        # Lista de paquetes Python requeridos
+        required_python_packages = {
+            'rich': 'rich',  # nombre_import: nombre_pip
+        }
+        
+        missing_packages = []
+        
+        # Verificar Rich especialmente
+        if not RICH_AVAILABLE:
+            self.console.print("❌ Rich no está disponible", style="red")
+            missing_packages.append('rich')
+        else:
+            self.console.print("✅ Rich disponible", style="green")
+        
+        # Si hay paquetes faltantes, ofrecer instalarlos
+        if missing_packages:
+            self.console.print_panel(
+                f"📦 Paquetes Python faltantes: {', '.join(missing_packages)}\n"
+                "Rich mejora significativamente la experiencia del usuario con tablas y colores.",
+                title="📋 Paquetes Python Requeridos",
+                style="yellow"
+            )
+            
+            if self.console.confirm("¿Deseas instalar los paquetes Python necesarios?", default=True):
+                return self._install_python_packages(missing_packages)
+            else:
+                self.console.print("⚠️  Continuando sin Rich. La experiencia será más limitada.", style="yellow")
+                return True
+        
+        return True
+    
+    def _install_python_packages(self, packages: list) -> bool:
+        """Instala paquetes de Python usando apt (repositorios del sistema)"""
+        self.console.print("📦 Instalando paquetes de Python desde repositorios...")
+        
+        # Instalar cada paquete
+        success_count = 0
+        for package in packages:
+            self.console.print(f"   🔄 Instalando {package}...")
+            
+            # Usar apt para instalar desde repositorios del sistema
+            if package == 'rich':
+                try:
+                    self.console.print(f"   🔄 Instalando python3-{package} desde repositorios...")
+                    self.system.run_command(['apt', 'install', '-y', f'python3-{package}'], 
+                                          capture_output=True)
+                    self.console.print(f"   ✅ python3-{package} instalado desde repositorios", style="green")
+                    success_count += 1
+                except subprocess.CalledProcessError as e:
+                    self.console.print(f"   ❌ Error instalando python3-{package}: {e}", style="red")
+            else:
+                # Para otros paquetes futuros, usar la misma estrategia
+                try:
+                    self.console.print(f"   🔄 Instalando python3-{package} desde repositorios...")
+                    self.system.run_command(['apt', 'install', '-y', f'python3-{package}'], 
+                                          capture_output=True)
+                    self.console.print(f"   ✅ python3-{package} instalado desde repositorios", style="green")
+                    success_count += 1
+                except subprocess.CalledProcessError as e:
+                    self.console.print(f"   ❌ Error instalando python3-{package}: {e}", style="red")
+        
+        # Evaluar resultado
+        if success_count == len(packages):
+            self.console.print_panel(
+                "✅ Todos los paquetes Python se instalaron exitosamente.\n"
+                "⚠️  NOTA: Reinicia el script para que los cambios surtan efecto completo.",
+                title="✅ Instalación Completada",
+                style="green"
+            )
+            
+            # Sugerir reinicio si se instaló Rich
+            if 'rich' in packages:
+                self.console.print(
+                    "💡 Para aprovechar Rich completamente, reinicia el script: python3 raid_manager.py",
+                    style="blue"
+                )
+            return True
+        elif success_count > 0:
+            self.console.print_panel(
+                f"⚠️  Se instalaron {success_count} de {len(packages)} paquetes.\n"
+                "El script puede funcionar pero con funcionalidad limitada.",
+                title="⚠️  Instalación Parcial",
+                style="yellow"
+            )
+            return True
+        else:
+            self.console.print_panel(
+                "❌ No se pudo instalar ningún paquete Python.\n"
+                "El script funcionará con funcionalidad básica.",
+                title="❌ Instalación Fallida",
+                style="red"
+            )
+            return False
+    
+    def _check_basic_tools(self) -> bool:
+        """Verifica herramientas básicas del sistema"""
+        self.console.print("🔧 Verificando herramientas básicas...")
+        
+        missing_commands = []
+        for command in self.required_commands['basic']:
+            if not self._command_exists(command):
+                missing_commands.append(command)
+        
+        if missing_commands:
+            self.console.print(f"⚠️  Herramientas básicas faltantes: {', '.join(missing_commands)}", style="yellow")
+            return False
+        else:
+            self.console.print("✅ Herramientas básicas disponibles", style="green")
+            return True
+    
+    def _check_raid_tools(self) -> dict:
+        """Verifica disponibilidad de herramientas RAID"""
+        self.console.print("🔍 Verificando herramientas RAID...")
+        
+        tools_status = {}
+        
+        # Verificar BTRFS
+        btrfs_ok = all(self._command_exists(cmd) for cmd in self.required_commands['btrfs'])
+        tools_status['btrfs'] = btrfs_ok
+        
+        if btrfs_ok:
+            try:
+                result = self.system.run_command(['btrfs', '--version'], capture_output=True)
+                version = result.stdout.strip().split()[-1] if result.stdout else "desconocida"
+                self.console.print(f"✅ BTRFS disponible (versión: {version})", style="green")
+            except subprocess.CalledProcessError:
+                self.console.print("⚠️  BTRFS detectado pero con problemas", style="yellow")
+        else:
+            self.console.print("❌ BTRFS no disponible", style="red")
+        
+        # Verificar ZFS
+        zfs_ok = all(self._command_exists(cmd) for cmd in self.required_commands['zfs'])
+        tools_status['zfs'] = zfs_ok
+        
+        if zfs_ok:
+            try:
+                result = self.system.run_command(['zpool', '--version'], capture_output=True)
+                version_line = result.stdout.strip().split('\n')[0] if result.stdout else ""
+                version = version_line.split()[-1] if version_line else "desconocida"
+                self.console.print(f"✅ ZFS disponible (versión: {version})", style="green")
+            except subprocess.CalledProcessError:
+                self.console.print("⚠️  ZFS detectado pero con problemas", style="yellow")
+        else:
+            self.console.print("❌ ZFS no disponible", style="red")
+        
+        # Verificar mdadm
+        mdadm_ok = self._command_exists('mdadm')
+        tools_status['mdadm'] = mdadm_ok
+        
+        if mdadm_ok:
+            self.console.print("✅ mdadm disponible", style="green")
+        else:
+            self.console.print("❌ mdadm no disponible", style="red")
+        
+        return tools_status
+    
+    def _command_exists(self, command: str) -> bool:
+        """Verifica si un comando existe en el sistema"""
+        try:
+            self.system.run_command(['which', command], capture_output=True, use_sudo=False)
+            return True
+        except subprocess.CalledProcessError:
+            return False
+    
+    def _show_tools_summary(self, tools_status: dict):
+        """Muestra resumen de herramientas disponibles"""
+        available_tools = [tool for tool, status in tools_status.items() if status]
+        
+        if available_tools:
+            self.console.print_panel(
+                f"Herramientas RAID disponibles: {', '.join(available_tools).upper()}",
+                title="✅ Herramientas Disponibles",
+                style="green"
+            )
+        else:
+            self.console.print_panel(
+                "No se encontraron herramientas RAID disponibles",
+                title="❌ Sin Herramientas RAID",
+                style="red"
+            )
+    
+    def _install_missing_packages(self) -> bool:
+        """Instala paquetes faltantes"""
+        self.console.print_panel(
+            "Instalando herramientas RAID necesarias...",
+            title="📦 Instalación"
+        )
+        
+        # Verificar permisos
+        if not self.system.is_root() and not self.system.check_sudo():
+            self.console.print("❌ Se requieren permisos de administrador para instalar paquetes", style="red")
+            return False
+        
+        # Actualizar lista de paquetes
+        self.console.print("🔄 Actualizando lista de paquetes...")
+        try:
+            self.system.run_command(['apt', 'update'], capture_output=False)
+        except subprocess.CalledProcessError:
+            self.console.print("⚠️  Error actualizando lista de paquetes", style="yellow")
+        
+        # Instalar paquetes básicos
+        basic_packages = self.required_packages['basic'] + self.required_packages['mdadm']
+        self._install_package_group("herramientas básicas", basic_packages)
+        
+        # Preguntar sobre BTRFS
+        if self.console.confirm("¿Instalar soporte para BTRFS?", default=True):
+            self._install_package_group("BTRFS", self.required_packages['btrfs'])
+        
+        # Preguntar sobre ZFS (con advertencia)
+        if self.console.confirm("¿Instalar soporte para ZFS? (puede tomar varios minutos)", default=True):
+            self.console.print_panel(
+                "⚠️  ADVERTENCIA: La instalación de ZFS puede tomar mucho tiempo\n"
+                "y requiere compilación de módulos del kernel.\n"
+                "El progreso se mostrará en tiempo real.",
+                title="📋 Instalación ZFS",
+                style="yellow"
+            )
+            
+            if self.console.confirm("¿Continuar con la instalación de ZFS?", default=True):
+                self._install_package_group("ZFS", self.required_packages['zfs'], show_progress=True)
+        
+        # Verificar instalación
+        self.console.print("🔍 Verificando instalación...")
+        raid_tools = self._check_raid_tools()
+        
+        if any(raid_tools.values()):
+            self.console.print_panel(
+                "✅ Instalación completada exitosamente",
+                title="✅ Éxito",
+                style="green"
+            )
+            return True
+        else:
+            self.console.print_panel(
+                "❌ La instalación no fue completamente exitosa",
+                title="❌ Error",
+                style="red"
+            )
+            return False
+    
+    def _install_selective_packages(self, missing_tools: list) -> bool:
+        """Instala selectivamente solo las herramientas RAID faltantes"""
+        self.console.print_panel(
+            f"Instalando herramientas faltantes: {', '.join(tool.upper() for tool in missing_tools)}",
+            title="📦 Instalación Selectiva"
+        )
+        
+        # Verificar permisos
+        if not self.system.is_root() and not self.system.check_sudo():
+            self.console.print("❌ Se requieren permisos de administrador para instalar paquetes", style="red")
+            return False
+        
+        # Actualizar lista de paquetes
+        self.console.print("🔄 Actualizando lista de paquetes...")
+        try:
+            self.system.run_command(['apt', 'update'], capture_output=True)
+        except subprocess.CalledProcessError:
+            self.console.print("⚠️  Error actualizando lista de paquetes", style="yellow")
+        
+        # Instalar cada herramienta según lo que falte
+        installation_success = False
+        
+        for tool in missing_tools:
+            if tool == 'btrfs':
+                if self.console.confirm("¿Instalar soporte para BTRFS?", default=True):
+                    self._install_package_group("BTRFS", self.required_packages['btrfs'])
+                    installation_success = True
+                    
+            elif tool == 'zfs':
+                if self.console.confirm("¿Instalar soporte para ZFS? (puede tomar varios minutos)", default=True):
+                    self.console.print_panel(
+                        "⚠️  ADVERTENCIA: La instalación de ZFS puede tomar mucho tiempo\n"
+                        "y requiere compilación de módulos del kernel.\n"
+                        "El progreso se mostrará en tiempo real.",
+                        title="📋 Instalación ZFS",
+                        style="yellow"
+                    )
+                    
+                    if self.console.confirm("¿Continuar con la instalación de ZFS?", default=True):
+                        self._install_package_group("ZFS", self.required_packages['zfs'], show_progress=True)
+                        installation_success = True
+                        
+            elif tool == 'mdadm':
+                if self.console.confirm("¿Instalar soporte para MDADM?", default=True):
+                    self._install_package_group("MDADM", self.required_packages['mdadm'])
+                    installation_success = True
+        
+        # Solo verificar si se instaló algo
+        if installation_success:
+            # Verificar instalación
+            self.console.print("🔍 Verificando instalación...")
+            raid_tools = self._check_raid_tools()
+            
+            newly_available = [tool for tool, available in raid_tools.items() if available and tool in missing_tools]
+            
+            if newly_available:
+                self.console.print_panel(
+                    f"✅ Nuevas herramientas disponibles: {', '.join(tool.upper() for tool in newly_available)}",
+                    title="✅ Instalación Exitosa",
+                    style="green"
+                )
+                return True
+            else:
+                self.console.print_panel(
+                    "⚠️  La instalación se completó pero algunas herramientas pueden no estar disponibles",
+                    title="⚠️  Instalación Parcial",
+                    style="yellow"
+                )
+                return True
+        else:
+            self.console.print_panel(
+                "ℹ️  No se instalaron nuevas herramientas. Continuando con las disponibles.",
+                title="ℹ️  Sin Cambios",
+                style="blue"
+            )
+            return True
+    
+    def _install_specific_raid_tool(self, tool: str) -> bool:
+        """Instala una herramienta RAID específica"""
+        
+        # Verificar permisos
+        if not self.system.is_root() and not self.system.check_sudo():
+            self.console.print("❌ Se requieren permisos de administrador para instalar paquetes", style="red")
+            return False
+        
+        # Actualizar lista de paquetes
+        self.console.print("🔄 Actualizando lista de paquetes...")
+        try:
+            self.system.run_command(['apt', 'update'], capture_output=True)
+        except subprocess.CalledProcessError:
+            self.console.print("⚠️  Error actualizando lista de paquetes", style="yellow")
+        
+        # Instalar herramienta específica
+        if tool == 'zfs':
+            self.console.print_panel(
+                "⚠️  ADVERTENCIA: La instalación de ZFS puede tomar mucho tiempo\n"
+                "y requiere compilación de módulos del kernel.\n"
+                "El progreso se mostrará en tiempo real.",
+                title="📋 Instalación ZFS",
+                style="yellow"
+            )
+            
+            if self.console.confirm("¿Continuar con la instalación de ZFS?", default=True):
+                self._install_package_group("ZFS", self.required_packages['zfs'], show_progress=True)
+            else:
+                return False
+                
+        elif tool == 'btrfs':
+            self._install_package_group("BTRFS", self.required_packages['btrfs'])
+            
+        elif tool == 'mdadm':
+            self._install_package_group("MDADM", self.required_packages['mdadm'])
+        else:
+            self.console.print(f"❌ Herramienta desconocida: {tool}", style="red")
+            return False
+        
+        # Verificar instalación
+        self.console.print("🔍 Verificando instalación...")
+        updated_tools = self._check_raid_tools()
+        
+        if updated_tools.get(tool, False):
+            self.console.print_panel(
+                f"✅ {tool.upper()} instalado y disponible",
+                title="✅ Instalación Exitosa",
+                style="green"
+            )
+            return True
+        else:
+            self.console.print_panel(
+                f"❌ Error en la instalación de {tool.upper()}",
+                title="❌ Instalación Fallida",
+                style="red"
+            )
+            return False
+    
+    def _install_package_group(self, group_name: str, packages: list, show_progress: bool = False):
+        """Instala un grupo de paquetes"""
+        self.console.print(f"📦 Instalando {group_name}...")
+        
+        for package in packages:
+            try:
+                self.console.print(f"   🔄 Instalando {package}...")
+                
+                if show_progress:
+                    # Mostrar salida en tiempo real para paquetes que toman mucho tiempo
+                    self.system.run_command(['apt', 'install', '-y', package], capture_output=False)
+                else:
+                    # Instalar silenciosamente para paquetes rápidos
+                    self.system.run_command(['apt', 'install', '-y', package], capture_output=True)
+                
+                self.console.print(f"   ✅ {package} instalado", style="green")
+                
+            except subprocess.CalledProcessError:
+                self.console.print(f"   ❌ Error instalando {package}", style="red")
+
 class SystemManager:
     """Gestión de operaciones del sistema"""
     
@@ -160,7 +633,7 @@ class SystemManager:
         self.sudo_commands = {
             'umount', 'mount', 'mkfs', 'wipefs', 'dd', 'zpool', 'zfs', 
             'btrfs', 'mdadm', 'pvremove', 'vgchange', 'vgreduce', 'lvremove',
-            'partprobe', 'sgdisk', 'mkdir', 'chown', 'chmod'
+            'partprobe', 'sgdisk', 'mkdir', 'chown', 'chmod', 'apt', 'pip', 'pip3'
         }
     
     def _setup_logging(self) -> logging.Logger:
@@ -415,13 +888,50 @@ class RAIDManager:
         self.console = UIConsole()
         self.system = SystemManager(self.console)
         self.disk_manager = DiskManager(self.system, self.console)
+        self.requirements_checker = RequirementsChecker(self.console, self.system)
+        self.raid_tools_status = {}  # Cache del estado de herramientas RAID
+        
+    def run(self):
+        """Punto de entrada principal del programa"""
+        # Mostrar banner inicial
+        self._show_banner()
+        
+        # Verificar requisitos del sistema
+        if not self.requirements_checker.check_all_requirements():
+            self.console.print("❌ No se pueden cumplir los requisitos mínimos del sistema", style="red")
+            self.console.print("💡 El programa no puede continuar sin las herramientas necesarias", style="blue")
+            return False
+        
+        # Cachear el estado actual de herramientas RAID para evitar verificaciones redundantes
+        self.raid_tools_status = self.requirements_checker._check_raid_tools()
+        
+        # Continuar con el menú principal
+        self.main_menu()
+        return True
+    
+    def _update_raid_tools_status(self):
+        """Actualiza el cache del estado de herramientas RAID"""
+        self.raid_tools_status = self.requirements_checker._check_raid_tools()
+    
+    def _show_banner(self):
+        """Muestra el banner inicial del programa"""
+        banner = """
+╔════════════════════════════════════════════════════════════════╗
+║                    RAID Configuration Manager                  ║
+║                   Gestión Avanzada de Almacenamiento          ║
+║                         Versión Python 3                      ║
+╚════════════════════════════════════════════════════════════════╝
+        """
+        
+        self.console.print(banner, style="cyan")
+        self.console.print("🏠 Para Raspberry Pi y sistemas Linux", style="blue")
+        self.console.print("🔧 Soporte para ZFS, BTRFS y herramientas de disco\n", style="blue")
         
     def main_menu(self):
         """Menú principal"""
         self.console.print_panel(
-            "Script de Configuración RAID para Raspberry Pi\n"
-            "Versión Python - Gestión avanzada de almacenamiento",
-            title="🏠 RAID Manager",
+            "Selecciona una opción del menú para gestionar tu almacenamiento",
+            title="📋 Menú Principal",
             style="blue"
         )
         
@@ -433,6 +943,9 @@ class RAIDManager:
                 "3. Gestionar pools/filesystems existentes",
                 "4. Herramientas de disco",
                 "5. Configuración del sistema",
+                "6. Verificar requisitos del sistema",
+                "7. Actualizar paquetes del sistema",
+                "8. Corregir driver Realtek RTL8125",
                 "0. Salir"
             ]
             
@@ -454,6 +967,12 @@ class RAIDManager:
                 self.disk_tools()
             elif choice == "5":
                 self.system_configuration()
+            elif choice == "6":
+                self.requirements_checker.check_all_requirements()
+            elif choice == "7":
+                self.update_system_packages()
+            elif choice == "8":
+                self.fix_realtek_rtl8125_driver()
             else:
                 self.console.print("❌ Opción inválida", style="red")
     
@@ -493,6 +1012,471 @@ class RAIDManager:
                 title="📭 Sin configuraciones RAID",
                 style="yellow"
             )
+    
+    def update_system_packages(self):
+        """Actualiza solo los paquetes necesarios para RAID Manager"""
+        self.console.print_panel(
+            "Verificando actualizaciones de paquetes necesarios para RAID Manager...",
+            title="🔄 Actualización de Paquetes RAID"
+        )
+        
+        # Verificar permisos
+        if not self.system.is_root() and not self.system.check_sudo():
+            self.console.print("❌ Se requieren permisos de administrador para actualizar paquetes", style="red")
+            return
+        
+        # Lista de paquetes que necesitamos para RAID Manager
+        required_packages = [
+            'zfsutils-linux',  # ZFS
+            'btrfs-progs',     # BTRFS
+            'mdadm',           # MDADM
+            'util-linux',      # Herramientas básicas (lsblk, etc.)
+            'parted',          # Gestión de particiones
+            'python3-rich'     # Interfaz mejorada
+        ]
+        
+        # Actualizar lista de paquetes
+        self.console.print("🔄 Actualizando lista de paquetes disponibles...")
+        try:
+            self.system.run_command(['apt', 'update'], capture_output=True)
+            self.console.print("✅ Lista de paquetes actualizada", style="green")
+        except subprocess.CalledProcessError:
+            self.console.print("❌ Error actualizando lista de paquetes", style="red")
+            return
+        
+        # Verificar estado actual de nuestros paquetes
+        self.console.print("🔍 Verificando estado de paquetes necesarios...")
+        
+        package_status = {}
+        updates_available = []
+        
+        for package in required_packages:
+            try:
+                # Verificar si está instalado
+                result = self.system.run_command(['dpkg', '-l', package], capture_output=True, use_sudo=False)
+                if result.returncode == 0:
+                    # Verificar si tiene actualizaciones
+                    result = self.system.run_command(['apt', 'list', '--upgradable', package], capture_output=True, use_sudo=False)
+                    if len(result.stdout.split('\n')) > 2:  # Header + package line
+                        updates_available.append(package)
+                        package_status[package] = "actualizable"
+                    else:
+                        package_status[package] = "actualizado"
+                else:
+                    package_status[package] = "no_instalado"
+            except subprocess.CalledProcessError:
+                package_status[package] = "error"
+        
+        # Mostrar estado actual
+        self._show_package_status(package_status)
+        
+        # Procesar actualizaciones si las hay
+        if updates_available:
+            self.console.print_panel(
+                f"Se encontraron {len(updates_available)} paquetes con actualizaciones disponibles:",
+                title="🔧 Actualizaciones Disponibles",
+                style="yellow"
+            )
+            
+            for package in updates_available:
+                self.console.print(f"   📦 {package}")
+            
+            if self.console.confirm("¿Actualizar estos paquetes?", default=True):
+                self._update_required_packages(updates_available)
+        else:
+            # Verificar paquetes no instalados
+            missing_packages = [pkg for pkg, status in package_status.items() if status == "no_instalado"]
+            
+            if missing_packages:
+                self.console.print_panel(
+                    f"Se encontraron {len(missing_packages)} paquetes no instalados:",
+                    title="📦 Paquetes Faltantes",
+                    style="blue"
+                )
+                
+                for package in missing_packages:
+                    self.console.print(f"   📦 {package}")
+                
+                if self.console.confirm("¿Instalar paquetes faltantes?", default=True):
+                    self._install_required_packages(missing_packages)
+            else:
+                self.console.print_panel(
+                    "✅ Todos los paquetes necesarios están instalados y actualizados.",
+                    title="✅ Paquetes Actualizados",
+                    style="green"
+                )
+    
+    def _show_package_status(self, package_status: dict):
+        """Muestra el estado actual de los paquetes necesarios"""
+        if RICH_AVAILABLE:
+            table = Table(title="📦 Estado de Paquetes RAID Manager", show_header=True, header_style="bold blue")
+            table.add_column("Paquete", style="cyan", no_wrap=True)
+            table.add_column("Estado", style="green")
+            table.add_column("Descripción", style="white")
+            
+            status_icons = {
+                "actualizado": "✅",
+                "actualizable": "🔄",
+                "no_instalado": "❌",
+                "error": "⚠️"
+            }
+            
+            status_colors = {
+                "actualizado": "green",
+                "actualizable": "yellow", 
+                "no_instalado": "red",
+                "error": "red"
+            }
+            
+            descriptions = {
+                'zfsutils-linux': 'Sistema de archivos ZFS',
+                'btrfs-progs': 'Sistema de archivos BTRFS',
+                'mdadm': 'Gestión de RAID por software',
+                'util-linux': 'Herramientas básicas del sistema',
+                'parted': 'Gestión de particiones',
+                'python3-rich': 'Interfaz de usuario mejorada'
+            }
+            
+            for package, status in package_status.items():
+                icon = status_icons.get(status, "?")
+                status_text = f"{icon} {status.replace('_', ' ').title()}"
+                description = descriptions.get(package, "Paquete del sistema")
+                
+                table.add_row(
+                    package,
+                    Text(status_text, style=status_colors.get(status, "white")),
+                    description
+                )
+            
+            self.console.console.print(table)
+        else:
+            self.console.print("\n📦 Estado de paquetes:")
+            for package, status in package_status.items():
+                status_display = status.replace('_', ' ').title()
+                self.console.print(f"   {package}: {status_display}")
+    
+    def _update_required_packages(self, packages: list):
+        """Actualiza paquetes específicos necesarios para RAID Manager"""
+        self.console.print("🔄 Actualizando paquetes necesarios...")
+        
+        try:
+            success_count = 0
+            for package in packages:
+                self.console.print(f"   🔄 Actualizando {package}...")
+                self.system.run_command(['apt', 'install', '--only-upgrade', '-y', package], capture_output=True)
+                self.console.print(f"   ✅ {package} actualizado", style="green")
+                success_count += 1
+            
+            self.console.print_panel(
+                f"✅ {success_count} paquetes actualizados exitosamente.\n"
+                "💡 Se recomienda reiniciar el script para aprovechar las mejoras.",
+                title="✅ Actualización Completada",
+                style="green"
+            )
+            
+            # Verificar si se actualizó ZFS
+            if any('zfs' in pkg for pkg in packages):
+                self.console.print_panel(
+                    "⚠️  Se actualizaron componentes de ZFS.\n"
+                    "Es recomendable reiniciar el sistema para cargar los nuevos módulos.",
+                    title="🔄 Reinicio Recomendado",
+                    style="yellow"
+                )
+            
+            # Verificar si se actualizó Rich
+            if 'python3-rich' in packages:
+                self.console.print_panel(
+                    "🎨 Se actualizó python3-rich.\n"
+                    "Reinicia el script para aprovechar las nuevas funcionalidades de interfaz.",
+                    title="🔄 Reinicio de Script Recomendado",
+                    style="blue"
+                )
+            
+            # Actualizar cache del estado de herramientas después de la actualización
+            self._update_raid_tools_status()
+                
+        except subprocess.CalledProcessError as e:
+            self.console.print(f"❌ Error actualizando paquetes: {e}", style="red")
+    
+    def _install_required_packages(self, packages: list):
+        """Instala paquetes faltantes necesarios para RAID Manager"""
+        self.console.print("📦 Instalando paquetes necesarios...")
+        
+        try:
+            success_count = 0
+            for package in packages:
+                self.console.print(f"   🔄 Instalando {package}...")
+                
+                # Mostrar progreso para ZFS ya que puede tomar tiempo
+                if package == 'zfsutils-linux':
+                    self.console.print_panel(
+                        "⚠️  La instalación de ZFS puede tomar varios minutos.\n"
+                        "Por favor espera mientras se descargan y compilan los módulos.",
+                        title="📋 Instalando ZFS",
+                        style="yellow"
+                    )
+                    self.system.run_command(['apt', 'install', '-y', package], capture_output=False)
+                else:
+                    self.system.run_command(['apt', 'install', '-y', package], capture_output=True)
+                
+                self.console.print(f"   ✅ {package} instalado", style="green")
+                success_count += 1
+            
+            self.console.print_panel(
+                f"✅ {success_count} paquetes instalados exitosamente.\n"
+                "💡 Reinicia el script para aprovechar todas las funcionalidades.",
+                title="✅ Instalación Completada",
+                style="green"
+            )
+            
+            # Verificar si se instaló ZFS
+            if 'zfsutils-linux' in packages:
+                self.console.print_panel(
+                    "🔧 ZFS instalado exitosamente.\n"
+                    "Ya puedes crear pools ZFS con todas las funcionalidades avanzadas.",
+                    title="🎉 ZFS Disponible",
+                    style="green"
+                )
+            
+            # Verificar si se instaló Rich
+            if 'python3-rich' in packages:
+                self.console.print_panel(
+                    "🎨 python3-rich instalado exitosamente.\n"
+                    "Reinicia el script para disfrutar de la interfaz mejorada con tablas y colores.",
+                    title="🎉 Interfaz Mejorada Disponible",
+                    style="green"
+                )
+            
+            # Actualizar cache del estado de herramientas después de la instalación
+            self._update_raid_tools_status()
+                
+        except subprocess.CalledProcessError as e:
+            self.console.print(f"❌ Error instalando paquetes: {e}", style="red")
+    
+    def fix_realtek_rtl8125_driver(self):
+        """Detecta y corrige problemas con el driver Realtek RTL8125"""
+        self.console.print_panel(
+            "Detección y Corrección del Driver Realtek RTL8125\n"
+            "Verifica si el dispositivo RTL8125 está usando el driver correcto.",
+            title="🌐 Driver de Red Realtek",
+            style="blue"
+        )
+        
+        # Detectar dispositivos de red Realtek RTL8125
+        rtl8125_devices = self._detect_rtl8125_devices()
+        
+        if not rtl8125_devices:
+            self.console.print_panel(
+                "ℹ️ No se detectaron dispositivos Realtek RTL8125 en el sistema.",
+                title="ℹ️ Sin Dispositivos RTL8125",
+                style="blue"
+            )
+            return
+        
+        # Mostrar dispositivos detectados
+        self.console.print_panel(
+            f"🔍 Dispositivos RTL8125 detectados: {len(rtl8125_devices)}\n" +
+            "\n".join([f"• {device}" for device in rtl8125_devices]),
+            title="🌐 Dispositivos Detectados",
+            style="yellow"
+        )
+        
+        # Verificar driver actual
+        driver_issues = self._check_rtl8125_driver_status(rtl8125_devices)
+        
+        if not driver_issues:
+            self.console.print_panel(
+                "✅ Todos los dispositivos RTL8125 están usando el driver correcto.",
+                title="✅ Driver Correcto",
+                style="green"
+            )
+            return
+        
+        # Mostrar problemas detectados
+        self.console.print_panel(
+            "⚠️ Problemas detectados con el driver RTL8125:\n" +
+            "\n".join([f"• {issue}" for issue in driver_issues]),
+            title="⚠️ Problemas del Driver",
+            style="red"
+        )
+        
+        # Ofrecer corrección
+        if self.console.confirm(
+            "¿Deseas instalar el driver correcto para RTL8125? "
+            "(Esto reemplazará el driver r8169 por r8125)", 
+            default=True
+        ):
+            return self._install_rtl8125_driver()
+        else:
+            self.console.print("ℹ️ Corrección cancelada por el usuario.", style="blue")
+            return False
+
+    def _detect_rtl8125_devices(self) -> list:
+        """Detecta dispositivos Realtek RTL8125 en el sistema"""
+        try:
+            # Usar lspci para detectar dispositivos RTL8125
+            result = self.system.run_command(['lspci', '-nn'], capture_output=True)
+            
+            rtl8125_devices = []
+            for line in result.stdout.split('\n'):
+                # Buscar líneas que contengan RTL8125 o el ID del dispositivo
+                if 'RTL8125' in line or '10ec:8125' in line:
+                    rtl8125_devices.append(line.strip())
+            
+            return rtl8125_devices
+            
+        except subprocess.CalledProcessError:
+            self.console.print("❌ Error ejecutando lspci", style="red")
+            return []
+
+    def _check_rtl8125_driver_status(self, devices: list) -> list:
+        """Verifica el estado del driver para dispositivos RTL8125"""
+        issues = []
+        
+        try:
+            # Usar lspci -vv para obtener información detallada del driver
+            result = self.system.run_command(['lspci', '-vv'], capture_output=True)
+            output = result.stdout
+            
+            # Buscar secciones de RTL8125 y verificar el driver
+            in_rtl8125_section = False
+            current_device = ""
+            
+            for line in output.split('\n'):
+                # Detectar inicio de sección RTL8125
+                if 'RTL8125' in line or '10ec:8125' in line:
+                    in_rtl8125_section = True
+                    current_device = line.strip()
+                    continue
+                
+                # Detectar fin de sección (nueva línea que empieza con dirección PCI)
+                if in_rtl8125_section and line and not line.startswith('\t') and ':' in line:
+                    in_rtl8125_section = False
+                    continue
+                
+                # Verificar línea de driver dentro de la sección RTL8125
+                if in_rtl8125_section and 'Kernel driver in use:' in line:
+                    driver = line.split(':')[-1].strip()
+                    if driver == 'r8169':
+                        issues.append(f"Dispositivo usando driver incorrecto 'r8169': {current_device}")
+                    elif driver != 'r8125':
+                        issues.append(f"Dispositivo usando driver desconocido '{driver}': {current_device}")
+                    # Si es r8125, está correcto, no añadir a issues
+                    
+        except subprocess.CalledProcessError:
+            issues.append("Error verificando estado del driver con lspci")
+            
+        return issues
+
+    def _install_rtl8125_driver(self) -> bool:
+        """Instala el driver correcto RTL8125"""
+        self.console.print_panel(
+            "Instalando driver correcto para Realtek RTL8125\n"
+            "⚠️ ADVERTENCIA: Este proceso requerirá reinicio del sistema",
+            title="🔧 Instalación del Driver",
+            style="yellow"
+        )
+        
+        try:
+            # Verificar permisos
+            if not self.system.is_root() and not self.system.check_sudo():
+                self.console.print("❌ Se requieren permisos de administrador", style="red")
+                return False
+            
+            # Instalar dependencias
+            self.console.print("🔧 Instalando dependencias necesarias...")
+            dependencies = [
+                'dkms', 'build-essential', 
+                f'linux-headers-{self._get_kernel_version()}', 'git'
+            ]
+            
+            # Actualizar repositorios
+            self.system.run_command(['apt', 'update'], capture_output=True)
+            
+            # Instalar dependencias
+            self.system.run_command(['apt', 'install', '-y'] + dependencies, capture_output=False)
+            
+            # Clonar repositorio del driver
+            self.console.print("⬇️ Clonando repositorio oficial del driver r8125...")
+            
+            # Limpiar directorio temporal si existe
+            self.system.run_command(['rm', '-rf', '/tmp/realtek-r8125-dkms'], capture_output=True)
+            
+            # Clonar repositorio
+            self.system.run_command([
+                'git', 'clone', 
+                'https://github.com/awesometic/realtek-r8125-dkms.git',
+                '/tmp/realtek-r8125-dkms'
+            ], capture_output=False)
+            
+            # Instalar driver mediante DKMS
+            self.console.print("⚙️ Instalando el driver mediante DKMS...")
+            self.system.run_command([
+                'bash', '/tmp/realtek-r8125-dkms/dkms-install.sh'
+            ], capture_output=False, cwd='/tmp/realtek-r8125-dkms')
+            
+            # Bloquear driver r8169
+            self.console.print("⛔️ Bloqueando el driver r8169 para evitar conflictos...")
+            blacklist_content = "blacklist r8169\n"
+            with open('/tmp/blacklist-r8169.conf', 'w') as f:
+                f.write(blacklist_content)
+            
+            self.system.run_command([
+                'cp', '/tmp/blacklist-r8169.conf', '/etc/modprobe.d/blacklist-r8169.conf'
+            ], capture_output=True)
+            
+            # Actualizar initramfs
+            self.console.print("🧱 Actualizando initramfs...")
+            self.system.run_command(['update-initramfs', '-u'], capture_output=False)
+            
+            # Limpiar archivos temporales
+            self.system.run_command(['rm', '-rf', '/tmp/realtek-r8125-dkms', '/tmp/blacklist-r8169.conf'], 
+                                  capture_output=True)
+            
+            self.console.print_panel(
+                "✅ Instalación del driver RTL8125 completada con éxito.\n"
+                "🔁 SE REQUIERE REINICIO para aplicar los cambios.",
+                title="✅ Instalación Exitosa",
+                style="green"
+            )
+            
+            # Ofrecer reinicio
+            if self.console.confirm("¿Deseas reiniciar ahora para aplicar los cambios?", default=False):
+                self.console.print("🔁 Reiniciando sistema...", style="blue")
+                self.system.run_command(['reboot'], capture_output=False)
+            else:
+                self.console.print_panel(
+                    "ℹ️ Reinicia manualmente cuando estés listo: sudo reboot\n"
+                    "Los cambios del driver no surtirán efecto hasta reiniciar.",
+                    title="ℹ️ Reinicio Pendiente",
+                    style="blue"
+                )
+            
+            return True
+            
+        except subprocess.CalledProcessError as e:
+            self.console.print_panel(
+                f"❌ Error durante la instalación del driver:\n{str(e)}",
+                title="❌ Error de Instalación",
+                style="red"
+            )
+            return False
+        except Exception as e:
+            self.console.print_panel(
+                f"❌ Error inesperado: {str(e)}",
+                title="❌ Error",
+                style="red"
+            )
+            return False
+
+    def _get_kernel_version(self) -> str:
+        """Obtiene la versión del kernel actual"""
+        try:
+            result = self.system.run_command(['uname', '-r'], capture_output=True)
+            return result.stdout.strip()
+        except subprocess.CalledProcessError:
+            return "$(uname -r)"  # Fallback
+    
     
     def create_raid_wizard(self):
         """Asistente para crear nueva configuración RAID"""
@@ -1231,17 +2215,78 @@ class RAIDManager:
                 print(f"  {i}. {disk.name} - {disk.size_human} - {disk.model}")
     
     def _select_filesystem_type(self) -> FilesystemType:
-        """Selecciona tipo de filesystem"""
+        """Selecciona tipo de filesystem usando información ya verificada"""
+        
         self.console.print("\n📁 Tipo de filesystem:")
-        self.console.print("   1. ZFS (recomendado para máxima funcionalidad)")
-        self.console.print("   2. BTRFS (alternativa moderna)")
+        
+        # Usar el estado ya verificado al inicio del script
+        raid_tools = self.raid_tools_status
+        
+        # Mostrar ZFS con estado
+        if raid_tools.get('zfs', False):
+            self.console.print("   1. ZFS (recomendado para máxima funcionalidad) ✅")
+        else:
+            self.console.print("   1. ZFS (recomendado para máxima funcionalidad) ❌ No instalado")
+        
+        # Mostrar BTRFS con estado  
+        if raid_tools.get('btrfs', False):
+            self.console.print("   2. BTRFS (alternativa moderna) ✅")
+        else:
+            self.console.print("   2. BTRFS (alternativa moderna) ❌ No instalado")
         
         while True:
             choice = self.console.prompt("👉 Selecciona tipo", "1")
+            
             if choice == "1":
-                return FilesystemType.ZFS
+                # Usuario seleccionó ZFS
+                if not raid_tools.get('zfs', False):
+                    self.console.print_panel(
+                        "⚠️  ZFS no está instalado en el sistema.\n"
+                        "ZFS ofrece características avanzadas como snapshots, compresión y detección de errores.",
+                        title="🔷 ZFS No Disponible",
+                        style="yellow"
+                    )
+                    
+                    if self.console.confirm("¿Deseas instalar ZFS ahora?", default=True):
+                        if self.requirements_checker._install_specific_raid_tool('zfs'):
+                            self.console.print("✅ ZFS instalado correctamente", style="green")
+                            # Actualizar cache después de la instalación
+                            self.raid_tools_status['zfs'] = True
+                            return FilesystemType.ZFS
+                        else:
+                            self.console.print("❌ Error instalando ZFS. Selecciona otra opción.", style="red")
+                            continue
+                    else:
+                        self.console.print("💡 Selecciona BTRFS o instala ZFS para continuar.", style="blue")
+                        continue
+                else:
+                    return FilesystemType.ZFS
+                    
             elif choice == "2":
-                return FilesystemType.BTRFS
+                # Usuario seleccionó BTRFS
+                if not raid_tools.get('btrfs', False):
+                    self.console.print_panel(
+                        "⚠️  BTRFS no está instalado en el sistema.\n"
+                        "BTRFS ofrece características modernas como snapshots, compresión y balanceado.",
+                        title="🌿 BTRFS No Disponible", 
+                        style="yellow"
+                    )
+                    
+                    if self.console.confirm("¿Deseas instalar BTRFS ahora?", default=True):
+                        if self.requirements_checker._install_specific_raid_tool('btrfs'):
+                            self.console.print("✅ BTRFS instalado correctamente", style="green")
+                            # Actualizar cache después de la instalación
+                            self.raid_tools_status['btrfs'] = True
+                            return FilesystemType.BTRFS
+                        else:
+                            self.console.print("❌ Error instalando BTRFS. Selecciona otra opción.", style="red")
+                            continue
+                    else:
+                        self.console.print("💡 Selecciona ZFS o instala BTRFS para continuar.", style="blue")
+                        continue
+                else:
+                    return FilesystemType.BTRFS
+                    
             else:
                 self.console.print("❌ Opción inválida", style="red")
     
@@ -4099,22 +5144,37 @@ def main():
     parser = argparse.ArgumentParser(description="RAID Manager para Raspberry Pi")
     parser.add_argument("--debug", action="store_true", help="Modo debug")
     parser.add_argument("--config", type=str, help="Archivo de configuración")
+    parser.add_argument("--skip-requirements", action="store_true", 
+                       help="Omitir verificación de requisitos (no recomendado)")
     
     args = parser.parse_args()
     
     # Verificar permisos
     if os.geteuid() == 0:
         print("❌ No ejecutes este script como root. Usa sudo cuando sea necesario.")
+        print("💡 El script solicitará sudo automáticamente cuando lo necesite.")
         sys.exit(1)
     
     try:
         raid_manager = RAIDManager()
-        raid_manager.main_menu()
+        
+        # Ejecutar con verificación de requisitos (a menos que se omita)
+        if args.skip_requirements:
+            print("⚠️  Omitiendo verificación de requisitos...")
+            raid_manager.main_menu()
+        else:
+            success = raid_manager.run()
+            if not success:
+                sys.exit(1)
+                
     except KeyboardInterrupt:
         print("\n👋 Script interrumpido por el usuario")
         sys.exit(0)
     except Exception as e:
         print(f"❌ Error inesperado: {e}")
+        if args.debug:
+            import traceback
+            traceback.print_exc()
         sys.exit(1)
 
 if __name__ == "__main__":
