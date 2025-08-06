@@ -108,7 +108,15 @@ def test_advantages():
     print("   ✅ Compatibilidad con actualizaciones del kernel (DKMS)")
     print("   ✅ Mejora significativa del rendimiento de red")
     
-    print("\n📋 4. Experiencia de Usuario Mejorada:")
+    print("\n� 4. Recuperación RAID después de Reinstalación:")
+    print("   ✅ Detección automática de pools/arrays existentes")
+    print("   ✅ Importación inteligente de pools ZFS exportados")
+    print("   ✅ Detección de filesystems BTRFS preservados")
+    print("   ✅ Reensamblado de arrays MDADM inactivos")
+    print("   ✅ Verificación de integridad después de recuperación")
+    print("   ✅ Preparación para montaje automático")
+    
+    print("\n�📋 5. Experiencia de Usuario Mejorada:")
     print("   ✅ Información clara sobre estado de paquetes y drivers")
     print("   ✅ Opciones flexibles según disponibilidad")
     print("   ✅ Instalación/actualización no intrusiva")
@@ -157,10 +165,71 @@ def test_rtl8125_scenarios():
     print("│ RTL8125 en el sistema            │")
     print("╰───────────────────────────────────╯")
 
+def test_raid_recovery_scenarios():
+    print("\n\n🔄 SIMULACIÓN: Recuperación RAID después de Reinstalación")
+    print("="*60)
+    
+    # Escenario 1: ZFS pools exportados
+    print("\n🔷 Escenario 1: Pools ZFS exportados")
+    print("   💻 Situación: Sistema recién instalado, discos ZFS intactos")
+    print("   🔍 Detección: zpool import encuentra pools disponibles")
+    print("   📊 Pools encontrados: tst_2, test_ll")
+    print("   💬 Pregunta al usuario cuáles importar")
+    
+    print("\n✅ Comportamiento esperado:")
+    print("╭─── 🔷 Pools ZFS Disponibles ───╮")
+    print("│ • tst_2                         │")
+    print("│ • test_ll                       │")
+    print("│ ¿Importar pool 'tst_2'? [S/n]   │")
+    print("╰─────────────────────────────────╯")
+    
+    print("\n✅ Si acepta → zpool import -f → Verificación → Pool activo")
+    print("❌ Si rechaza → Pool permanece exportado")
+    
+    # Escenario 2: BTRFS filesystems
+    print("\n🌿 Escenario 2: Filesystems BTRFS")
+    print("   💻 Situación: BTRFS arrays detectables automáticamente")
+    print("   🔍 Detección: btrfs filesystem show encuentra UUIDs")
+    print("   📊 Estado: Detectados pero no montados automáticamente")
+    
+    print("\n✅ Comportamiento esperado:")
+    print("╭─── 🌿 Filesystems BTRFS ───╮")
+    print("│ UUID: abc12345... (3 discos) │")
+    print("│ Estado: Detectado            │")
+    print("│ Montaje: Manual requerido    │")
+    print("╰──────────────────────────────╯")
+    
+    # Escenario 3: MDADM arrays inactivos
+    print("\n⚙️ Escenario 3: Arrays MDADM inactivos")
+    print("   💻 Situación: Arrays RAID en estado 'inactive'")
+    print("   🔍 Detección: mdadm --examine --scan encuentra arrays")
+    print("   📊 Estado: Requieren reensamblado")
+    
+    print("\n✅ Comportamiento esperado:")
+    print("╭─── ⚙️ Arrays MDADM ───╮")
+    print("│ ARRAY /dev/md0         │")
+    print("│ ¿Reensamblar? [S/n]    │")
+    print("╰────────────────────────╯")
+    
+    print("\n✅ Si acepta → mdadm --assemble → Verificación → Array activo")
+    print("❌ Si rechaza → Array permanece inactivo")
+    
+    # Escenario 4: Sin configuraciones
+    print("\n🔵 Escenario 4: Sin configuraciones recuperables")
+    print("   💻 Situación: Discos limpios o configuraciones ya activas")
+    print("   📝 Resultado: Información al usuario")
+    
+    print("\nℹ️ Comportamiento esperado:")
+    print("╭─── ℹ️ Sin Configuraciones Recuperables ───╮")
+    print("│ No se encontraron configuraciones RAID    │")
+    print("│ recuperables en el sistema                │")
+    print("╰────────────────────────────────────────────╯")
+
 if __name__ == "__main__":
     test_dynamic_filesystem_selection()
     test_package_update_scenarios()
     test_rtl8125_scenarios()
+    test_raid_recovery_scenarios()
     test_advantages()
     
     print(f"\n{'='*60}")
@@ -174,3 +243,7 @@ if __name__ == "__main__":
     print("✅ Nueva opción 8: Corrección driver RTL8125")
     print("✅ Detección automática de dispositivos de red")
     print("✅ Instalación DKMS para compatibilidad del kernel")
+    print("✅ Nueva opción 9: Recuperación RAID después de reinstalación")
+    print("✅ Importación automática de pools ZFS exportados")
+    print("✅ Detección de filesystems BTRFS existentes")
+    print("✅ Reensamblado de arrays MDADM inactivos")

@@ -682,9 +682,26 @@ class SystemManager:
             )
             return result
         except subprocess.CalledProcessError as e:
+            # Asegurar que stderr esté disponible en la excepción
+            if hasattr(e, 'stderr') and e.stderr:
+                error_detail = e.stderr.strip()
+            elif hasattr(e, 'stdout') and e.stdout:
+                error_detail = e.stdout.strip()
+            else:
+                error_detail = str(e)
+            
             self.logger.error(f"Error ejecutando comando: {e}")
+            self.logger.error(f"Stderr: {error_detail}")
+            
             if show_errors:
                 self.console.print(f"❌ Error ejecutando comando: {e}", style="red")
+                if error_detail:
+                    self.console.print(f"Detalles: {error_detail}", style="red")
+            
+            # Añadir stderr a la excepción si no está presente
+            if not hasattr(e, 'stderr'):
+                e.stderr = error_detail
+            
             raise
     
     def run_command_safe(self, command: List[str], show_errors: bool = False) -> bool:
@@ -946,6 +963,7 @@ class RAIDManager:
                 "6. Verificar requisitos del sistema",
                 "7. Actualizar paquetes del sistema",
                 "8. Corregir driver Realtek RTL8125",
+                "9. Recuperar RAID después de reinstalación",
                 "0. Salir"
             ]
             
@@ -973,6 +991,8 @@ class RAIDManager:
                 self.update_system_packages()
             elif choice == "8":
                 self.fix_realtek_rtl8125_driver()
+            elif choice == "9":
+                self.recover_raid_after_reinstall()
             else:
                 self.console.print("❌ Opción inválida", style="red")
     
@@ -1476,6 +1496,931 @@ class RAIDManager:
             return result.stdout.strip()
         except subprocess.CalledProcessError:
             return "$(uname -r)"  # Fallback
+
+    def recover_raid_after_reinstall(self):
+        """Recupera configuraciones RAID después de una reinstalación del sistema"""
+        self.console.print_panel(
+            "Recuperación de RAID después de Reinstalación\n"
+            "Busca y recupera pools/arrays RAID existentes en los discos.",
+            title="🔄 Recuperación de RAID",
+            style="blue"
+        )
+        
+        # Verificar permisos
+        if not self.system.is_root() and not self.system.check_sudo():
+            self.console.print("❌ Se requieren permisos de administrador para recuperar RAID", style="red")
+            return
+        
+        # Mostrar información sobre el proceso
+        self.console.print_panel(
+            "ℹ️ Esta función busca configuraciones RAID existentes que pueden haberse\n"
+            "desconectado después de una reinstalación del sistema operativo.\n\n"
+            "🔷 ZFS: Busca pools exportados para reimportar\n"
+            "🌿 BTRFS: Detecta filesystems existentes\n"
+            "⚙️ MDADM: Busca arrays inactivos para reensamblar",
+            title="ℹ️ Información del Proceso",
+            style="blue"
+        )
+        
+        # Escanear cada tipo de RAID
+        recovered_items = []
+        
+        # 1. Recuperar ZFS
+        if self.raid_tools_status.get('zfs', False):
+            zfs_pools = self._recover_zfs_pools()
+            recovered_items.extend(zfs_pools)
+        
+        # 2. Recuperar BTRFS
+        if self.raid_tools_status.get('btrfs', False):
+            btrfs_filesystems = self._recover_btrfs_filesystems()
+            recovered_items.extend(btrfs_filesystems)
+        
+        # 3. Recuperar MDADM
+        if self.raid_tools_status.get('mdadm', False):
+            mdadm_arrays = self._recover_mdadm_arrays()
+            recovered_items.extend(mdadm_arrays)
+        
+        # Mostrar resumen
+        if recovered_items:
+            self.console.print_panel(
+                f"✅ Recuperación completada: {len(recovered_items)} elemento(s) encontrado(s)\n\n" +
+                "\n".join([f"• {item}" for item in recovered_items]),
+                title="✅ Recuperación Exitosa",
+                style="green"
+            )
+            
+            # Separar elementos por tipo para configuración específica
+            zfs_items = [item for item in recovered_items if item.startswith('ZFS Pool:')]
+            btrfs_items = [item for item in recovered_items if item.startswith('BTRFS:')]
+            mdadm_items = [item for item in recovered_items if item.startswith('MDADM Array:')]
+            
+            # Configurar montaje automático solo para tipos que lo necesitan
+            needs_fstab_config = btrfs_items + mdadm_items
+            
+            if zfs_items:
+                self.console.print_panel(
+                    f"ℹ️ Pools ZFS ({len(zfs_items)}) ya tienen montaje automático nativo.\n"
+                    "Los datasets se montan automáticamente al iniciar el sistema.",
+                    title="🔷 ZFS - Montaje Automático Nativo",
+                    style="blue"
+                )
+            
+            if needs_fstab_config:
+                if self.console.confirm(f"¿Configurar montaje automático en /etc/fstab para {len(needs_fstab_config)} elemento(s)?", default=True):
+                    self._setup_fstab_mounting(needs_fstab_config)
+            
+            # Verificar configuración ZFS por separado
+            if zfs_items and self.console.confirm("¿Verificar configuración de montaje automático de ZFS?", default=True):
+                for zfs_item in zfs_items:
+                    self._configure_zfs_automount(zfs_item)
+                
+        else:
+            self.console.print_panel(
+                "ℹ️ No se encontraron configuraciones RAID recuperables.\n"
+                "Esto puede deberse a:\n"
+                "• Los discos están completamente limpios\n"
+                "• Las configuraciones ya están activas\n"
+                "• Los discos no están conectados",
+                title="ℹ️ Sin Configuraciones Recuperables",
+                style="yellow"
+            )
+
+    def _recover_zfs_pools(self) -> list:
+        """Recupera pools ZFS exportados"""
+        self.console.print("🔷 Buscando pools ZFS...")
+        recovered = []
+        
+        try:
+            # Buscar pools disponibles para importar
+            result = self.system.run_command(['zpool', 'import'], capture_output=True)
+            
+            if "no pools available to import" in result.stdout.lower():
+                self.console.print("   ℹ️ No se encontraron pools ZFS para importar", style="blue")
+                return recovered
+            
+            # Parsear salida para encontrar pools
+            pools_found = []
+            current_pool = None
+            
+            for line in result.stdout.split('\n'):
+                line = line.strip()
+                if line.startswith('pool:'):
+                    current_pool = line.split('pool:')[1].strip()
+                    pools_found.append(current_pool)
+            
+            if not pools_found:
+                # Intentar método alternativo: escanear directorios
+                try:
+                    result = self.system.run_command(['zpool', 'import', '-d', '/dev'], capture_output=True)
+                    # Parsear esta salida también
+                    for line in result.stdout.split('\n'):
+                        if line.strip().startswith('pool:'):
+                            pool_name = line.split('pool:')[1].strip()
+                            if pool_name not in pools_found:
+                                pools_found.append(pool_name)
+                except:
+                    pass
+            
+            # Mostrar pools encontrados
+            if pools_found:
+                self.console.print_panel(
+                    f"🔷 Pools ZFS encontrados: {len(pools_found)}\n" +
+                    "\n".join([f"• {pool}" for pool in pools_found]),
+                    title="🔷 Pools ZFS Disponibles",
+                    style="blue"
+                )
+                
+                # Preguntar cuáles importar
+                for pool in pools_found:
+                    if self.console.confirm(f"¿Importar pool ZFS '{pool}'?", default=True):
+                        try:
+                            # Importar pool
+                            self.console.print(f"   🔄 Importando pool '{pool}'...")
+                            import_result = self.system.run_command(['zpool', 'import', '-f', pool], capture_output=True)
+                            
+                            # Verificar importación
+                            status_result = self.system.run_command(['zpool', 'status', pool], capture_output=True)
+                            if status_result.returncode == 0:
+                                self.console.print(f"   ✅ Pool '{pool}' importado exitosamente", style="green")
+                                recovered.append(f"ZFS Pool: {pool}")
+                                
+                                # Mostrar información del pool
+                                self._show_zfs_pool_info(pool)
+                            else:
+                                self.console.print(f"   ❌ Error verificando pool '{pool}'", style="red")
+                                
+                        except subprocess.CalledProcessError as e:
+                            # Capturar stderr para mostrar el error específico
+                            error_msg = e.stderr.strip() if hasattr(e, 'stderr') and e.stderr else str(e)
+                            
+                            # Mostrar error detallado
+                            self.console.print_panel(
+                                f"❌ Error importando pool '{pool}':\n\n"
+                                f"Código de salida: {e.returncode}\n"
+                                f"Error: {error_msg}\n\n"
+                                f"💡 Posibles causas:\n"
+                                f"• El pool ya está importado\n"
+                                f"• Faltan discos del pool\n"
+                                f"• Pool con el mismo nombre ya existe\n"
+                                f"• Permisos insuficientes\n"
+                                f"• Pool corrupto o dañado",
+                                title=f"❌ Error ZFS: {pool}",
+                                style="red"
+                            )
+                            
+                            # Ofrecer diagnóstico adicional
+                            if self.console.confirm(f"¿Ejecutar diagnóstico adicional para '{pool}'?", default=True):
+                                self._diagnose_zfs_import_error(pool)
+            else:
+                self.console.print("   ℹ️ No se encontraron pools ZFS para importar", style="blue")
+                
+        except subprocess.CalledProcessError:
+            self.console.print("   ❌ Error ejecutando zpool import", style="red")
+        
+        return recovered
+
+    def _diagnose_zfs_import_error(self, pool_name: str):
+        """Diagnostica problemas de importación ZFS"""
+        self.console.print(f"🔍 Ejecutando diagnóstico para pool '{pool_name}'...")
+        
+        try:
+            # 1. Verificar si el pool ya está importado
+            self.console.print("   📊 Verificando si el pool ya está activo...")
+            try:
+                active_result = self.system.run_command(['zpool', 'list', pool_name], capture_output=True)
+                if active_result.returncode == 0:
+                    self.console.print_panel(
+                        f"✅ El pool '{pool_name}' ya está importado y activo.\n\n"
+                        f"Estado actual:\n{active_result.stdout}",
+                        title="ℹ️ Pool Ya Activo",
+                        style="blue"
+                    )
+                    return
+            except subprocess.CalledProcessError:
+                pass  # Pool no está activo, continuar diagnóstico
+            
+            # 2. Verificar disponibilidad de dispositivos
+            self.console.print("   🔍 Verificando dispositivos del pool...")
+            try:
+                import_check = self.system.run_command(['zpool', 'import', '-d', '/dev'], capture_output=True)
+                if pool_name in import_check.stdout:
+                    # Encontrar la sección específica del pool
+                    lines = import_check.stdout.split('\n')
+                    in_pool_section = False
+                    pool_info = []
+                    
+                    for line in lines:
+                        if f'pool: {pool_name}' in line:
+                            in_pool_section = True
+                            pool_info.append(line)
+                        elif in_pool_section and line.strip().startswith('pool:'):
+                            break  # Nueva sección de pool
+                        elif in_pool_section:
+                            pool_info.append(line)
+                    
+                    if pool_info:
+                        self.console.print_panel(
+                            f"📊 Información detallada del pool:\n\n" +
+                            "\n".join(pool_info),
+                            title=f"🔍 Diagnóstico: {pool_name}",
+                            style="yellow"
+                        )
+            except subprocess.CalledProcessError as e:
+                self.console.print(f"   ❌ Error obteniendo información detallada: {e.stderr if hasattr(e, 'stderr') else e}")
+            
+            # 3. Verificar cachés ZFS
+            self.console.print("   🗂️ Verificando caché de ZFS...")
+            try:
+                cache_result = self.system.run_command(['zpool', 'import', '-c', '/etc/zfs/zpool.cache'], capture_output=True)
+                if pool_name in cache_result.stdout:
+                    self.console.print("   ✅ Pool encontrado en caché ZFS")
+                else:
+                    self.console.print("   ⚠️ Pool no encontrado en caché ZFS")
+            except subprocess.CalledProcessError:
+                self.console.print("   ℹ️ No se pudo verificar caché ZFS")
+            
+            # 4. Sugerir acciones de recuperación
+            self.console.print_panel(
+                "🛠️ Acciones de recuperación sugeridas:\n\n"
+                "1. Si el pool ya está activo, no necesita importación\n"
+                "2. Si faltan discos, conecta todos los dispositivos\n"
+                "3. Si hay conflicto de nombres, usa: zpool import old_name new_name\n"
+                "4. Si el pool está corrupto, considera: zpool import -F\n"
+                "5. Para forzar importación: zpool import -f -m -N pool_name\n\n"
+                "⚠️ ADVERTENCIA: Las opciones de fuerza pueden causar pérdida de datos",
+                title="💡 Sugerencias de Recuperación",
+                style="blue"
+            )
+            
+            # 5. Ofrecer comandos manuales
+            if self.console.confirm("¿Intentar importación con opciones avanzadas?", default=False):
+                self._try_advanced_zfs_import(pool_name)
+                
+        except Exception as e:
+            self.console.print(f"❌ Error durante diagnóstico: {e}", style="red")
+
+    def _try_advanced_zfs_import(self, pool_name: str):
+        """Intenta importación ZFS con opciones avanzadas"""
+        options = [
+            ("Importar sin montar datasets (-N)", ['-N']),
+            ("Importar en modo solo lectura (-o readonly=on)", ['-o', 'readonly=on']),
+            ("Importar con recuperación forzada (-F)", ['-F']),
+            ("Importar con nombre alternativo", ['new_name'])
+        ]
+        
+        self.console.print("🔧 Opciones de importación avanzada:")
+        for i, (desc, _) in enumerate(options, 1):
+            self.console.print(f"   {i}. {desc}")
+        
+        choice = self.console.prompt("Selecciona opción (1-4, 0 para cancelar)", "0")
+        
+        if choice == "0":
+            return
+        
+        try:
+            choice_idx = int(choice) - 1
+            if 0 <= choice_idx < len(options):
+                desc, opts = options[choice_idx]
+                
+                if 'new_name' in opts:
+                    new_name = self.console.prompt(f"Nuevo nombre para pool '{pool_name}'")
+                    command = ['zpool', 'import'] + opts[:-1] + [pool_name, new_name]
+                else:
+                    command = ['zpool', 'import'] + opts + [pool_name]
+                
+                self.console.print(f"🔄 Ejecutando: {' '.join(command)}")
+                
+                if self.console.confirm("¿Continuar con esta operación?", default=False):
+                    result = self.system.run_command(command, capture_output=True)
+                    self.console.print("✅ Comando ejecutado exitosamente", style="green")
+                    if result.stdout:
+                        self.console.print(f"Salida: {result.stdout}")
+                else:
+                    self.console.print("Operación cancelada")
+            else:
+                self.console.print("Opción inválida")
+                
+        except (ValueError, subprocess.CalledProcessError) as e:
+            self.console.print(f"❌ Error: {e}", style="red")
+
+    def _recover_btrfs_filesystems(self) -> list:
+        """Recupera filesystems BTRFS"""
+        self.console.print("🌿 Buscando filesystems BTRFS...")
+        recovered = []
+        
+        try:
+            # Buscar filesystems BTRFS
+            result = self.system.run_command(['btrfs', 'filesystem', 'show'], capture_output=True)
+            
+            # Parsear salida para encontrar UUIDs y dispositivos
+            filesystems_found = []
+            current_uuid = None
+            current_devices = []
+            
+            for line in result.stdout.split('\n'):
+                line = line.strip()
+                if line.startswith('uuid:'):
+                    if current_uuid and current_devices:
+                        filesystems_found.append({
+                            'uuid': current_uuid,
+                            'devices': current_devices.copy()
+                        })
+                    current_uuid = line.split('uuid:')[1].strip()
+                    current_devices = []
+                elif line.startswith('devid') and 'path' in line:
+                    # Extraer ruta del dispositivo
+                    if 'path ' in line:
+                        device_path = line.split('path ')[1].strip()
+                        current_devices.append(device_path)
+            
+            # Agregar último filesystem si existe
+            if current_uuid and current_devices:
+                filesystems_found.append({
+                    'uuid': current_uuid,
+                    'devices': current_devices.copy()
+                })
+            
+            if filesystems_found:
+                self.console.print_panel(
+                    f"🌿 Filesystems BTRFS encontrados: {len(filesystems_found)}\n" +
+                    "\n".join([f"• UUID: {fs['uuid'][:8]}... ({len(fs['devices'])} dispositivos)" 
+                              for fs in filesystems_found]),
+                    title="🌿 Filesystems BTRFS Disponibles",
+                    style="green"
+                )
+                
+                # Verificar cuáles están montados
+                for fs in filesystems_found:
+                    uuid_short = fs['uuid'][:8]
+                    primary_device = fs['devices'][0] if fs['devices'] else 'unknown'
+                    
+                    # Verificar si ya está montado
+                    try:
+                        mount_result = self.system.run_command(['findmnt', '-S', primary_device], capture_output=True)
+                        if mount_result.returncode == 0:
+                            self.console.print(f"   ✅ Filesystem {uuid_short}... ya está montado", style="green")
+                            recovered.append(f"BTRFS: {uuid_short}... (ya montado)")
+                        else:
+                            self.console.print(f"   ℹ️ Filesystem {uuid_short}... detectado pero no montado", style="blue")
+                            
+                            # Ofrecer montaje
+                            if self.console.confirm(f"¿Montar filesystem BTRFS {uuid_short}...?", default=True):
+                                mountpoint = self.console.prompt(
+                                    f"Punto de montaje para {uuid_short}...",
+                                    f"/mnt/btrfs_{uuid_short}"
+                                )
+                                
+                                try:
+                                    # Crear directorio de montaje
+                                    self.system.run_command(['mkdir', '-p', mountpoint], capture_output=True)
+                                    
+                                    # Montar filesystem
+                                    self.system.run_command(['mount', '-t', 'btrfs', primary_device, mountpoint], capture_output=True)
+                                    self.console.print(f"   ✅ Filesystem montado en {mountpoint}", style="green")
+                                    recovered.append(f"BTRFS: {uuid_short}... (montado en {mountpoint})")
+                                except subprocess.CalledProcessError as e:
+                                    self.console.print(f"   ❌ Error montando filesystem: {e}", style="red")
+                                    recovered.append(f"BTRFS: {uuid_short}... (detectado)")
+                            else:
+                                recovered.append(f"BTRFS: {uuid_short}... (detectado)")
+                    except subprocess.CalledProcessError:
+                        self.console.print(f"   ℹ️ Filesystem {uuid_short}... detectado", style="blue")
+                        recovered.append(f"BTRFS: {uuid_short}... (detectado)")
+            else:
+                self.console.print("   ℹ️ No se encontraron filesystems BTRFS", style="blue")
+                
+        except subprocess.CalledProcessError:
+            self.console.print("   ❌ Error ejecutando btrfs filesystem show", style="red")
+        
+        return recovered
+
+    def _recover_mdadm_arrays(self) -> list:
+        """Recupera arrays MDADM"""
+        self.console.print("⚙️ Buscando arrays MDADM...")
+        recovered = []
+        
+        try:
+            # Buscar arrays inactivos
+            result = self.system.run_command(['mdadm', '--examine', '--scan'], capture_output=True)
+            
+            if result.stdout.strip():
+                arrays_found = []
+                for line in result.stdout.split('\n'):
+                    if line.strip() and line.startswith('ARRAY'):
+                        arrays_found.append(line.strip())
+                
+                if arrays_found:
+                    self.console.print_panel(
+                        f"⚙️ Arrays MDADM encontrados: {len(arrays_found)}\n" +
+                        "\n".join([f"• {array}" for array in arrays_found]),
+                        title="⚙️ Arrays MDADM Disponibles",
+                        style="yellow"
+                    )
+                    
+                    # Intentar reensamblar cada array
+                    for array_line in arrays_found:
+                        # Extraer nombre del array
+                        if '/dev/md' in array_line:
+                            array_name = array_line.split()[1]
+                            if self.console.confirm(f"¿Reensamblar array '{array_name}'?", default=True):
+                                try:
+                                    self.console.print(f"   🔄 Reensamblando {array_name}...")
+                                    self.system.run_command(['mdadm', '--assemble', array_name], capture_output=True)
+                                    
+                                    # Verificar estado
+                                    status_result = self.system.run_command(['mdadm', '--detail', array_name], capture_output=True)
+                                    if status_result.returncode == 0:
+                                        self.console.print(f"   ✅ Array '{array_name}' reensamblado exitosamente", style="green")
+                                        
+                                        # Detectar filesystem y ofrecer montaje
+                                        fs_type = self._detect_filesystem_on_device(array_name)
+                                        if fs_type:
+                                            self.console.print(f"   🔍 Filesystem detectado: {fs_type}")
+                                            
+                                            # Verificar si ya está montado
+                                            current_mountpoint = self._get_current_mountpoint(array_name)
+                                            if current_mountpoint:
+                                                self.console.print(f"   ✅ Ya montado en: {current_mountpoint}", style="green")
+                                                recovered.append(f"MDADM Array: {array_name} (montado en {current_mountpoint})")
+                                            else:
+                                                # Ofrecer montaje
+                                                if self.console.confirm(f"¿Montar {fs_type} en {array_name}?", default=True):
+                                                    mountpoint = self.console.prompt(
+                                                        f"Punto de montaje para {array_name}",
+                                                        f"/mnt/{array_name.replace('/dev/', '')}"
+                                                    )
+                                                    
+                                                    try:
+                                                        # Crear directorio y montar
+                                                        self.system.run_command(['mkdir', '-p', mountpoint], capture_output=True)
+                                                        self.system.run_command(['mount', array_name, mountpoint], capture_output=True)
+                                                        self.console.print(f"   ✅ Array montado en {mountpoint}", style="green")
+                                                        recovered.append(f"MDADM Array: {array_name} (montado en {mountpoint})")
+                                                    except subprocess.CalledProcessError as e:
+                                                        self.console.print(f"   ❌ Error montando array: {e}", style="red")
+                                                        recovered.append(f"MDADM Array: {array_name}")
+                                                else:
+                                                    recovered.append(f"MDADM Array: {array_name}")
+                                        else:
+                                            self.console.print(f"   ⚠️ No se detectó filesystem en {array_name}", style="yellow")
+                                            recovered.append(f"MDADM Array: {array_name}")
+                                    else:
+                                        self.console.print(f"   ❌ Error verificando array '{array_name}'", style="red")
+                                        
+                                except subprocess.CalledProcessError as e:
+                                    self.console.print(f"   ❌ Error reensamblando '{array_name}': {e}", style="red")
+            else:
+                self.console.print("   ℹ️ No se encontraron arrays MDADM para reensamblar", style="blue")
+                
+        except subprocess.CalledProcessError:
+            self.console.print("   ❌ Error ejecutando mdadm --examine --scan", style="red")
+        
+        return recovered
+
+    def _show_zfs_pool_info(self, pool_name: str):
+        """Muestra información detallada de un pool ZFS"""
+        try:
+            # Obtener información del pool
+            status_result = self.system.run_command(['zpool', 'status', pool_name], capture_output=True)
+            list_result = self.system.run_command(['zpool', 'list', pool_name], capture_output=True)
+            
+            # Obtener datasets y sus puntos de montaje
+            datasets_result = self.system.run_command(['zfs', 'list', '-H', '-o', 'name,mountpoint', pool_name], capture_output=True)
+            
+            datasets_info = "Datasets montados automáticamente:\n"
+            for line in datasets_result.stdout.strip().split('\n'):
+                if line.strip():
+                    parts = line.split('\t')
+                    if len(parts) >= 2:
+                        name, mountpoint = parts[0], parts[1]
+                        datasets_info += f"   • {name} → {mountpoint}\n"
+            
+            pool_state = "Unknown"
+            if 'state:' in status_result.stdout:
+                pool_state = status_result.stdout.split('state:')[1].split()[0]
+            
+            self.console.print_panel(
+                f"Pool: {pool_name}\n" +
+                f"Estado: {pool_state}\n\n" +
+                datasets_info,
+                title=f"ℹ️ Información del Pool {pool_name}",
+                style="blue"
+            )
+            
+        except subprocess.CalledProcessError:
+            pass
+
+    def _setup_fstab_mounting(self, items_for_fstab: list):
+        """Configura montaje automático en /etc/fstab solo para BTRFS y MDADM"""
+        self.console.print_panel(
+            "⚙️ Configurando montaje automático en /etc/fstab...\n"
+            "Solo para filesystems que requieren configuración manual.",
+            title="⚙️ Configuración /etc/fstab",
+            style="blue"
+        )
+        
+        for item in items_for_fstab:
+            if item.startswith('BTRFS:'):
+                self._configure_btrfs_automount(item)
+            elif item.startswith('MDADM Array:'):
+                self._configure_mdadm_automount(item)
+
+    def _setup_automatic_mounting(self, recovered_items: list):
+        """Configura montaje automático para elementos recuperados - DEPRECATED"""
+        # Esta función se mantiene por compatibilidad pero ya no se usa
+        self._setup_fstab_mounting([item for item in recovered_items if not item.startswith('ZFS Pool:')])
+    
+    def _configure_zfs_automount(self, zfs_item):
+        """Verifica y configura montaje automático nativo para ZFS"""
+        pool_name = zfs_item.split(':')[1].strip()
+        
+        self.console.print_panel(
+            f"🔷 Verificando configuración ZFS para pool: {pool_name}\n"
+            "ZFS usa montaje automático nativo - no requiere /etc/fstab",
+            title="🔷 Configuración ZFS",
+            style="blue"
+        )
+        
+        try:
+            # Obtener datasets del pool
+            result = self.system.run_command(['zfs', 'list', '-H', '-o', 'name,canmount,mountpoint', pool_name], capture_output=True)
+            
+            datasets_info = []
+            for line in result.stdout.strip().split('\n'):
+                if line.strip():
+                    parts = line.split('\t')
+                    if len(parts) >= 3:
+                        name, canmount, mountpoint = parts[0], parts[1], parts[2]
+                        datasets_info.append({
+                            'name': name,
+                            'canmount': canmount,
+                            'mountpoint': mountpoint
+                        })
+            
+            # Mostrar estado actual
+            self.console.print_panel(
+                "Estado actual de datasets:\n" +
+                "\n".join([f"• {ds['name']}: canmount={ds['canmount']}, mountpoint={ds['mountpoint']}" 
+                          for ds in datasets_info]),
+                title=f"📊 Datasets en {pool_name}",
+                style="green"
+            )
+            
+            # Verificar y corregir configuración
+            needs_fix = False
+            for ds in datasets_info:
+                if ds['canmount'] != 'on':
+                    needs_fix = True
+                    break
+            
+            if needs_fix:
+                if self.console.confirm("Algunos datasets no tienen montaje automático habilitado. ¿Corregir?", default=True):
+                    for ds in datasets_info:
+                        if ds['canmount'] != 'on':
+                            self.console.print(f"   🔧 Habilitando montaje automático para {ds['name']}")
+                            self.system.run_command(['zfs', 'set', 'canmount=on', ds['name']], capture_output=True)
+                    self.console.print("✅ Montaje automático configurado para todos los datasets", style="green")
+            else:
+                self.console.print("✅ ZFS ya tiene montaje automático configurado correctamente", style="green")
+            
+            # Verificar servicio ZFS
+            self._ensure_zfs_service_enabled()
+            
+            self.console.print_panel(
+                "ℹ️ ZFS configurado correctamente.\n"
+                "Los datasets se montarán automáticamente al iniciar el sistema.\n"
+                "No se requiere configuración adicional en /etc/fstab.",
+                title="✅ ZFS Listo",
+                style="green"
+            )
+            
+        except subprocess.CalledProcessError as e:
+            self.console.print(f"❌ Error configurando ZFS: {e}", style="red")
+
+    def _configure_btrfs_automount(self, btrfs_item):
+        """Configura montaje automático para BTRFS"""
+        uuid_info = btrfs_item.split(':')[1].strip()
+        uuid_short = uuid_info.split('...')[0].strip() if '...' in uuid_info else uuid_info
+        
+        self.console.print(f"🌿 Configurando montaje automático para BTRFS: {uuid_short}...")
+        
+        try:
+            # Encontrar el UUID completo y dispositivos
+            result = self.system.run_command(['btrfs', 'filesystem', 'show'], capture_output=True)
+            
+            full_uuid = None
+            devices = []
+            in_target_fs = False
+            
+            for line in result.stdout.split('\n'):
+                line = line.strip()
+                if line.startswith('uuid:') and uuid_short in line:
+                    full_uuid = line.split('uuid:')[1].strip()
+                    in_target_fs = True
+                elif in_target_fs and line.startswith('devid') and 'path' in line:
+                    device_path = line.split('path ')[1].strip()
+                    devices.append(device_path)
+                elif in_target_fs and line.startswith('uuid:'):
+                    break
+            
+            if not full_uuid or not devices:
+                self.console.print("❌ No se pudo obtener información completa del filesystem BTRFS", style="red")
+                return
+            
+            primary_device = devices[0]
+            
+            # Verificar si ya está montado
+            current_mountpoint = self._get_current_mountpoint(primary_device)
+            
+            if current_mountpoint:
+                mountpoint = current_mountpoint
+                self.console.print(f"📍 Ya montado en: {mountpoint}")
+            else:
+                # Ofrecer montaje primero
+                if self.console.confirm("El filesystem BTRFS no está montado. ¿Montarlo ahora?", default=True):
+                    mountpoint = self.console.prompt(
+                        f"Punto de montaje para BTRFS {uuid_short}",
+                        f"/mnt/btrfs_{uuid_short}"
+                    )
+                    
+                    # Crear directorio de montaje
+                    self.system.run_command(['mkdir', '-p', mountpoint], capture_output=True)
+                    
+                    # Montar filesystem
+                    self.system.run_command(['mount', '-t', 'btrfs', primary_device, mountpoint], capture_output=True)
+                    self.console.print(f"✅ BTRFS montado en {mountpoint}", style="green")
+                else:
+                    self.console.print("ℹ️ Configuración de montaje automático omitida (filesystem no montado)", style="blue")
+                    return
+            
+            # Detectar subvolúmenes
+            subvolumes = self._get_btrfs_subvolumes(primary_device, mountpoint)
+            
+            # Generar entradas fstab
+            fstab_entries = []
+            
+            # Entrada principal
+            fstab_entries.append(f"UUID={full_uuid} {mountpoint} btrfs defaults 0 0")
+            
+            # Entradas para subvolúmenes
+            for subvol in subvolumes:
+                if subvol != '@' and subvol != '.':  # Evitar subvolumen raíz y directorio actual
+                    subvol_mountpoint = f"{mountpoint}/{subvol}"
+                    fstab_entries.append(f"UUID={full_uuid} {subvol_mountpoint} btrfs defaults,subvol={subvol} 0 0")
+            
+            # Mostrar vista previa
+            self._show_fstab_preview(fstab_entries)
+            
+            if self.console.confirm("¿Añadir estas entradas a /etc/fstab?", default=True):
+                self._add_to_fstab(fstab_entries)
+                self.console.print("✅ Montaje automático configurado para BTRFS", style="green")
+            
+        except subprocess.CalledProcessError as e:
+            self.console.print(f"❌ Error configurando BTRFS: {e}", style="red")
+
+    def _configure_mdadm_automount(self, mdadm_item):
+        """Configura montaje automático para MDADM"""
+        array_name = mdadm_item.split(':')[1].strip()
+        
+        self.console.print(f"⚙️ Configurando montaje automático para MDADM: {array_name}")
+        
+        try:
+            # 1. Configurar array en mdadm.conf
+            array_uuid = self._get_mdadm_uuid(array_name)
+            
+            if array_uuid:
+                array_config = f"ARRAY {array_name} metadata=1.2 UUID={array_uuid}"
+                
+                self.console.print_panel(
+                    f"Configuración MDADM que se añadirá:\n{array_config}",
+                    title="📋 Configuración /etc/mdadm/mdadm.conf",
+                    style="blue"
+                )
+                
+                if self.console.confirm("¿Añadir configuración del array a /etc/mdadm/mdadm.conf?", default=True):
+                    self._add_to_mdadm_conf(array_config)
+            
+            # 2. Configurar filesystem en fstab
+            fs_type = self._detect_filesystem_on_device(array_name)
+            fs_uuid = self._get_filesystem_uuid(array_name)
+            
+            if fs_type and fs_uuid:
+                # Verificar si ya está montado
+                current_mountpoint = self._get_current_mountpoint(array_name)
+                
+                if current_mountpoint:
+                    mountpoint = current_mountpoint
+                    self.console.print(f"📍 Ya montado en: {mountpoint}")
+                else:
+                    # Ofrecer montaje
+                    if self.console.confirm(f"El array tiene filesystem {fs_type}. ¿Montarlo ahora?", default=True):
+                        mountpoint = self.console.prompt(
+                            f"Punto de montaje para {array_name}",
+                            f"/mnt/{array_name.replace('/dev/', '')}"
+                        )
+                        
+                        # Crear directorio y montar
+                        self.system.run_command(['mkdir', '-p', mountpoint], capture_output=True)
+                        self.system.run_command(['mount', array_name, mountpoint], capture_output=True)
+                        self.console.print(f"✅ Array montado en {mountpoint}", style="green")
+                    else:
+                        self.console.print("ℹ️ Configuración de montaje automático omitida (array no montado)", style="blue")
+                        return
+                
+                # Generar entrada fstab
+                fstab_entry = f"UUID={fs_uuid} {mountpoint} {fs_type} defaults 0 2"
+                
+                self._show_fstab_preview([fstab_entry])
+                
+                if self.console.confirm("¿Añadir entrada a /etc/fstab?", default=True):
+                    self._add_to_fstab([fstab_entry])
+                    self.console.print("✅ Montaje automático configurado para MDADM", style="green")
+            else:
+                self.console.print("⚠️ No se pudo detectar filesystem en el array", style="yellow")
+                
+        except subprocess.CalledProcessError as e:
+            self.console.print(f"❌ Error configurando MDADM: {e}", style="red")
+
+    def _get_current_mountpoint(self, device):
+        """Obtiene el punto de montaje actual de un dispositivo"""
+        try:
+            result = self.system.run_command(['findmnt', '-n', '-o', 'TARGET', '-S', device], capture_output=True)
+            return result.stdout.strip() if result.stdout.strip() else None
+        except subprocess.CalledProcessError:
+            return None
+
+    def _get_btrfs_subvolumes(self, device, mountpoint=None):
+        """Obtiene lista de subvolúmenes BTRFS"""
+        subvolumes = []
+        try:
+            if mountpoint:
+                # Si está montado, usar btrfs subvolume list
+                result = self.system.run_command(['btrfs', 'subvolume', 'list', mountpoint], capture_output=True)
+                for line in result.stdout.split('\n'):
+                    if 'path ' in line:
+                        subvol_path = line.split('path ')[1].strip()
+                        subvolumes.append(subvol_path)
+            else:
+                # Si no está montado, montar temporalmente para inspeccionar
+                temp_mount = f"/tmp/btrfs_inspect_{int(time.time())}"
+                self.system.run_command(['mkdir', '-p', temp_mount], capture_output=True)
+                self.system.run_command(['mount', '-t', 'btrfs', device, temp_mount], capture_output=True)
+                
+                result = self.system.run_command(['btrfs', 'subvolume', 'list', temp_mount], capture_output=True)
+                for line in result.stdout.split('\n'):
+                    if 'path ' in line:
+                        subvol_path = line.split('path ')[1].strip()
+                        subvolumes.append(subvol_path)
+                
+                # Desmontar temporal
+                self.system.run_command(['umount', temp_mount], capture_output=True)
+                self.system.run_command(['rmdir', temp_mount], capture_output=True)
+                
+        except subprocess.CalledProcessError:
+            pass
+        
+        return subvolumes
+
+    def _get_mdadm_uuid(self, array_name):
+        """Obtiene el UUID de un array MDADM"""
+        try:
+            result = self.system.run_command(['mdadm', '--detail', array_name], capture_output=True)
+            for line in result.stdout.split('\n'):
+                if 'UUID :' in line:
+                    return line.split('UUID :')[1].strip()
+        except subprocess.CalledProcessError:
+            pass
+        return None
+
+    def _detect_filesystem_on_device(self, device):
+        """Detecta el tipo de filesystem en un dispositivo"""
+        try:
+            result = self.system.run_command(['blkid', '-o', 'value', '-s', 'TYPE', device], capture_output=True)
+            return result.stdout.strip() if result.stdout.strip() else None
+        except subprocess.CalledProcessError:
+            return None
+
+    def _get_filesystem_uuid(self, device):
+        """Obtiene el UUID del filesystem en un dispositivo"""
+        try:
+            result = self.system.run_command(['blkid', '-o', 'value', '-s', 'UUID', device], capture_output=True)
+            return result.stdout.strip() if result.stdout.strip() else None
+        except subprocess.CalledProcessError:
+            return None
+
+    def _show_fstab_preview(self, entries):
+        """Muestra vista previa de entradas fstab"""
+        self.console.print_panel(
+            "Entradas que se añadirán a /etc/fstab:\n\n" +
+            "\n".join(entries),
+            title="� Vista Previa /etc/fstab",
+            style="blue"
+        )
+
+    def _add_to_fstab(self, entries):
+        """Añade entradas a /etc/fstab de forma segura"""
+        import time
+        try:
+            # Crear backup
+            backup_path = f"/etc/fstab.backup.{int(time.time())}"
+            self.system.run_command(['cp', '/etc/fstab', backup_path], capture_output=True)
+            
+            # Verificar que las entradas no existan ya
+            with open('/etc/fstab', 'r') as f:
+                existing_content = f.read()
+            
+            new_entries = []
+            for entry in entries:
+                # Extraer UUID de la entrada
+                uuid_part = entry.split()[0]
+                if uuid_part not in existing_content:
+                    new_entries.append(entry)
+            
+            if new_entries:
+                # Añadir nuevas entradas
+                with open('/etc/fstab', 'a') as f:
+                    f.write(f"\n# Entradas añadidas por RAID Manager - {time.strftime('%Y-%m-%d %H:%M:%S')}\n")
+                    for entry in new_entries:
+                        f.write(f"{entry}\n")
+                
+                self.console.print(f"✅ Backup creado: {backup_path}", style="green")
+                self.console.print(f"✅ {len(new_entries)} entradas añadidas a /etc/fstab", style="green")
+                
+                # Ofrecer prueba de configuración
+                if self.console.confirm("¿Probar configuración con 'mount -a'?", default=False):
+                    self._test_mount_configuration()
+            else:
+                self.console.print("ℹ️ Todas las entradas ya existen en /etc/fstab", style="blue")
+                
+        except Exception as e:
+            self.console.print(f"❌ Error modificando /etc/fstab: {e}", style="red")
+
+    def _add_to_mdadm_conf(self, config):
+        """Añade configuración a /etc/mdadm/mdadm.conf"""
+        import time
+        try:
+            conf_path = '/etc/mdadm/mdadm.conf'
+            backup_path = f"{conf_path}.backup.{int(time.time())}"
+            
+            # Crear backup
+            self.system.run_command(['cp', conf_path, backup_path], capture_output=True)
+            
+            # Verificar si la configuración ya existe
+            with open(conf_path, 'r') as f:
+                existing_content = f.read()
+            
+            if config not in existing_content:
+                # Añadir configuración
+                with open(conf_path, 'a') as f:
+                    f.write(f"\n# Configuración añadida por RAID Manager - {time.strftime('%Y-%m-%d %H:%M:%S')}\n")
+                    f.write(f"{config}\n")
+                
+                self.console.print(f"✅ Backup creado: {backup_path}", style="green")
+                self.console.print("✅ Configuración añadida a /etc/mdadm/mdadm.conf", style="green")
+                
+                # Actualizar initramfs
+                if self.console.confirm("¿Actualizar initramfs para aplicar cambios?", default=True):
+                    self.system.run_command(['update-initramfs', '-u'], capture_output=False)
+                    self.console.print("✅ initramfs actualizado", style="green")
+            else:
+                self.console.print("ℹ️ La configuración ya existe en mdadm.conf", style="blue")
+                
+        except Exception as e:
+            self.console.print(f"❌ Error modificando mdadm.conf: {e}", style="red")
+
+    def _test_mount_configuration(self):
+        """Prueba la configuración de montaje"""
+        try:
+            self.console.print("🧪 Probando configuración de montaje...")
+            self.system.run_command(['mount', '-a'], capture_output=True)
+            self.console.print("✅ Configuración de montaje válida", style="green")
+        except subprocess.CalledProcessError as e:
+            self.console.print_panel(
+                f"❌ Error en configuración de montaje:\n{str(e)}\n\n"
+                "Revisa /etc/fstab manualmente antes del próximo reinicio.",
+                title="⚠️ Error de Configuración",
+                style="red"
+            )
+
+    def _ensure_zfs_service_enabled(self):
+        """Asegura que los servicios ZFS estén habilitados"""
+        try:
+            # Verificar y habilitar servicios ZFS necesarios
+            services = ['zfs-import-cache', 'zfs-mount', 'zfs.target']
+            
+            for service in services:
+                try:
+                    # Verificar si está habilitado
+                    result = self.system.run_command(['systemctl', 'is-enabled', service], capture_output=True)
+                    if 'enabled' not in result.stdout:
+                        self.system.run_command(['systemctl', 'enable', service], capture_output=True)
+                        self.console.print(f"✅ Servicio {service} habilitado", style="green")
+                except subprocess.CalledProcessError:
+                    # Algunos servicios pueden no estar disponibles en todos los sistemas
+                    pass
+                    
+        except Exception as e:
+            self.console.print(f"⚠️ Advertencia configurando servicios ZFS: {e}", style="yellow")
     
     
     def create_raid_wizard(self):
